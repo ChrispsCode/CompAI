@@ -1,0 +1,28 @@
+{
+  "label": "Z-Image Turbo",
+  "node_name": "ZImageTurbo",
+  "tile_color": "0x2E8B6FFF",
+  "output": "nuke_save_image",
+  "bind": {
+    "prompt": [["nuke_prompt", "value"]],
+    "seed": [["nuke_ksampler", "seed"]],
+    "width": [["nuke_latent", "width"]],
+    "height": [["nuke_latent", "height"]]
+  },
+  "knobs": [
+    {
+      "name": "model",
+      "type": "choice",
+      "options": "server",
+      "match": "z_image",
+      "tooltip": "Diffusion model file, from the Z-Image models installed in ComfyUI.",
+      "bind": [["nuke_load_diffusion_model", "unet_name"]]
+    },
+    {
+      "name": "steps",
+      "type": "int",
+      "tooltip": "Sampling steps. Turbo is distilled for about 8; more is slower and rarely better.",
+      "bind": [["nuke_ksampler", "steps"]]
+    }
+  ]
+}

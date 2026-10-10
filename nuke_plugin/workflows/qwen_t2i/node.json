@@ -1,0 +1,26 @@
+{
+  "label": "Qwen Image",
+  "node_name": "QwenImage",
+  "tile_color": "0x6A4C93FF",
+  "output": "nuke_save",
+  "bind": {
+    "prompt": [["nuke_prompt", "value"]],
+    "seed": [["nuke_ksampler", "seed"], ["nuke_generate_text", "sampling_mode.seed"]],
+    "width": [["nuke_latent", "width"]],
+    "height": [["nuke_latent", "height"]]
+  },
+  "knobs": [
+    {
+      "name": "enhance",
+      "label": "enhance prompt",
+      "type": "bool",
+      "tooltip": "Rewrite the prompt with the Qwen 3.5 LLM before generating. Slower; the rewritten text appears in 'used prompt'.",
+      "bind": [["nuke_enhance_switch", "switch"]]
+    },
+    {
+      "name": "steps",
+      "type": "int",
+      "bind": [["nuke_ksampler", "steps"]]
+    }
+  ]
+}

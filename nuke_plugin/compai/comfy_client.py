@@ -1,24 +1,17 @@
 """
-comfy_client.py - minimal ComfyUI API client.
+comfy_client.py - minimal ComfyUI API client and workflow-JSON primitives.
 
-Standard library only, so it runs unchanged inside Nuke's Python.
+Standard library only and never imports nuke, so it runs unchanged inside
+Nuke's Python and from a shell.
 
-Workflow templates are API-format exports ("Save (API)") whose patchable
-nodes carry `nuke_*` titles. Nodes are found by title, never by ID, so
-re-exporting the template doesn't break anything.
-
-CLI test (add --image plate.png, repeatable, to run an edit template):
-    python comfy_client.py templates/basic_t2i_qwen_api_v002.json \
-        --prompt "An engagement ring in a ring box. Plain grey background." \
-        --width 1408 --height 736 --out ./ring_v001.png
+Workflows are API-format exports ("Save (API)"). Nodes are found by their
+title, never by ID, so re-exporting a workflow doesn't break anything.
+What gets patched, and from which knob, is decided in workflows.py.
 """
 
-import argparse
-import copy
 import json
 import math
 import os
-import random
 import time
 import urllib.error
 import urllib.parse
@@ -111,57 +104,22 @@ def bind_images(workflow, images, mode="upload", prefix="nuke_input_"):
 
 
 def generation_size(target_w, target_h, megapixels=1.0, multiple=16):
-    """Same aspect as the target, scaled to a megapixel budget, snapped."""
+    """Same aspect as the target, scaled to a megapixel budget, snapped.
+
+    A size that is already on the grid and as close to the budget as the
+    grid allows comes back unchanged, so an image generated at this budget
+    can be fed back in without being resampled."""
+    budget = megapixels * 1024 * 1024
+    on_grid = target_w % multiple == 0 and target_h % multiple == 0
+    # the furthest snapping each side by half a step can move the pixel count
+    slack = multiple / 2.0 * (target_w + target_h) + multiple ** 2 / 4.0
+    if on_grid and abs(target_w * target_h - budget) <= slack:
+        return int(target_w), int(target_h)
     aspect = target_w / float(target_h)
-    h = math.sqrt(megapixels * 1024 * 1024 / aspect)
+    h = math.sqrt(budget / aspect)
     w = h * aspect
     snap = lambda v: max(multiple, int(round(v / multiple)) * multiple)
     return snap(w), snap(h)
-
-
-def _patch_common(wf, prompt, seed, steps, enhance, filename_prefix):
-    """Patch the nodes every Qwen template shares. Returns the seed used."""
-    if seed is None:
-        seed = random.randint(0, 2**32 - 1)
-    set_input(wf, "nuke_prompt", "value", prompt)
-    set_input(wf, "nuke_enhance_switch", "switch", bool(enhance))
-    set_input(wf, "nuke_ksampler", "seed", int(seed))
-    set_input(wf, "nuke_generate_text", "sampling_mode.seed", int(seed))
-    if steps is not None:
-        set_input(wf, "nuke_ksampler", "steps", int(steps))
-    set_input(wf, "nuke_save", "filename_prefix", filename_prefix)
-    return seed
-
-
-def build_qwen_t2i(template, prompt, width, height, seed=None, steps=None,
-                   enhance=False, filename_prefix="nuke/qwen"):
-    """Patch a copy of the Qwen t2i template. Returns (workflow, seed)."""
-    wf = copy.deepcopy(template)
-    seed = _patch_common(wf, prompt, seed, steps, enhance, filename_prefix)
-    set_input(wf, "nuke_latent", "width", int(width))
-    set_input(wf, "nuke_latent", "height", int(height))
-    return wf, seed
-
-
-def build_qwen_edit(template, prompt, images, width=None, height=None,
-                    seed=None, steps=None, enhance=False, image_mode="upload",
-                    filename_prefix="nuke/qwen_edit"):
-    """Patch a copy of the Qwen edit template. Returns (workflow, seed).
-
-    images are upload names or absolute paths (see bind_images / image_mode),
-    in slot order. If width/height are given, nuke_size_switch routes the
-    Empty Latent in; otherwise the output follows reference image 1's size."""
-    if not images:
-        raise ComfyError("Edit template needs at least one input image")
-    wf = copy.deepcopy(template)
-    seed = _patch_common(wf, prompt, seed, steps, enhance, filename_prefix)
-    explicit = width is not None and height is not None
-    set_input(wf, "nuke_size_switch", "switch", explicit)
-    if explicit:
-        set_input(wf, "nuke_latent", "width", int(width))
-        set_input(wf, "nuke_latent", "height", int(height))
-    bind_images(wf, images, mode=image_mode)
-    return wf, seed
 
 
 # --------------------------------------------------------------------------
@@ -173,8 +131,8 @@ class ComfyClient:
         self.base = f"http://{host}"
         self.client_id = str(uuid.uuid4())
 
-    def _get_json(self, path):
-        with urllib.request.urlopen(self.base + path, timeout=30) as r:
+    def _get_json(self, path, timeout=30):
+        with urllib.request.urlopen(self.base + path, timeout=timeout) as r:
             return json.loads(r.read())
 
     def ping(self):
@@ -226,6 +184,14 @@ class ComfyClient:
             urllib.request.urlopen(req, timeout=10).close()
         except urllib.error.URLError:
             pass
+
+    def object_info(self, class_type=None, timeout=30):
+        """Node class specs from the server: all of them, or just one class
+        ({} if it isn't installed)."""
+        path = "/object_info"
+        if class_type:
+            path += "/" + urllib.parse.quote(class_type)
+        return self._get_json(path, timeout=timeout)
 
     def has_node(self, class_type):
         """True if the server has this node class installed."""
@@ -283,7 +249,7 @@ class ComfyClient:
 # Reading results
 # --------------------------------------------------------------------------
 
-def output_images(entry, workflow, save_title="nuke_save"):
+def output_images(entry, workflow, save_title):
     """Image refs ({filename, subfolder, type}) produced by the titled save node."""
     node_out = entry.get("outputs", {}).get(find_node(workflow, save_title), {})
     # SaveImage reports under "images"; scan all keys in case an advanced
@@ -312,16 +278,17 @@ def find_node_by_class(workflow, class_type):
 
 
 # --------------------------------------------------------------------------
-# One-call convenience + CLI
+# Running a patched workflow
 # --------------------------------------------------------------------------
 
-def run_workflow(client, wf, out_path, info, should_cancel=None, log=print):
+def run_workflow(client, wf, out_path, info, save_title, should_cancel=None,
+                 log=print):
     """Submit an already-patched workflow, wait, download, write sidecar."""
     t0 = time.time()
     pid = client.submit(wf)
     log("Queued %s" % pid)
     entry = client.wait(pid, should_cancel=should_cancel)
-    refs = output_images(entry, wf)
+    refs = output_images(entry, wf, save_title)
     if not refs:
         raise ComfyError("Job finished but no images found. Outputs: %s"
                          % list(entry.get("outputs", {})))
@@ -335,92 +302,3 @@ def run_workflow(client, wf, out_path, info, should_cancel=None, log=print):
         json.dump({"result": result, "workflow": wf}, f, indent=2)
     log("Done in %ss -> %s" % (result["seconds"], out_path))
     return result
-
-
-def generate(template_path, prompt, out_path, width=1024, height=1024,
-             seed=None, steps=None, enhance=False, host=DEFAULT_HOST,
-             should_cancel=None, log=print):
-    """Text to image, end to end."""
-    client = ComfyClient(host)
-    client.ping()
-    wf, seed = build_qwen_t2i(load_template(template_path), prompt, width, height,
-                              seed=seed, steps=steps, enhance=enhance)
-    log("Submitting %dx%d, seed %d" % (width, height, seed))
-    info = dict(prompt=prompt, seed=seed, width=width, height=height,
-                enhance=enhance)
-    return run_workflow(client, wf, out_path, info, should_cancel, log)
-
-
-def generate_edit(template_path, prompt, images, out_path, width=None,
-                  height=None, seed=None, steps=None, enhance=False,
-                  host=DEFAULT_HOST, input_mode="auto", upload_names=None,
-                  should_cancel=None, log=print):
-    """Image edit, end to end. images = local file paths in slot order.
-
-    input_mode: "path"   - Comfy reads the files where they are (needs the
-                           NukeLoadImagePath custom node and a shared disk)
-                "upload" - copy them into Comfy's input dir via /upload/image
-                "auto"   - path if the custom node is installed, else upload
-    """
-    client = ComfyClient(host)
-    client.ping()
-
-    mode = input_mode
-    has_loader = client.has_node(PATH_LOADER)
-    if mode == "auto":
-        mode = "path" if has_loader else "upload"
-    if mode == "path" and not has_loader:
-        raise ComfyError("input_mode 'path' needs the %s custom node in "
-                         "ComfyUI/custom_nodes (restart Comfy after installing)"
-                         % PATH_LOADER)
-
-    if mode == "path":
-        refs = [os.path.abspath(p) for p in images]
-    else:
-        refs = []
-        for i, path in enumerate(images):
-            name = upload_names[i] if upload_names else None
-            log("Uploading %s" % os.path.basename(path))
-            refs.append(client.upload_image(path, name=name))
-
-    wf, seed = build_qwen_edit(load_template(template_path), prompt, refs,
-                               width, height, seed=seed, steps=steps,
-                               enhance=enhance, image_mode=mode)
-    log("Submitting %d image(s) via %s, seed %d" % (len(refs), mode, seed))
-    info = dict(prompt=prompt, seed=seed, width=width, height=height,
-                enhance=enhance, images=[os.path.abspath(p) for p in images],
-                image_mode=mode)
-    return run_workflow(client, wf, out_path, info, should_cancel, log)
-
-
-def main():
-    p = argparse.ArgumentParser(description="Run a ComfyUI API template.")
-    p.add_argument("template")
-    p.add_argument("--prompt", required=True)
-    p.add_argument("--out", required=True)
-    p.add_argument("--width", type=int)
-    p.add_argument("--height", type=int)
-    p.add_argument("--seed", type=int)
-    p.add_argument("--steps", type=int)
-    p.add_argument("--enhance", action="store_true")
-    p.add_argument("--host", default=DEFAULT_HOST)
-    p.add_argument("--image", action="append", default=[],
-                   help="Input image (repeatable) - switches to edit mode")
-    p.add_argument("--input-mode", default="auto", choices=["auto", "path", "upload"])
-    a = p.parse_args()
-
-    if not a.image and (a.width is None or a.height is None):
-        a.width, a.height = a.width or 1024, a.height or 1024
-    if a.image:
-        r = generate_edit(a.template, a.prompt, a.image, a.out,
-                          a.width, a.height, a.seed, a.steps, a.enhance, a.host,
-                          input_mode=a.input_mode)
-    else:
-        r = generate(a.template, a.prompt, a.out, a.width, a.height,
-                     a.seed, a.steps, a.enhance, a.host)
-    if r["used_prompt"] and a.enhance:
-        print("\nEnhanced prompt:\n" + r["used_prompt"])
-
-
-if __name__ == "__main__":
-    main()

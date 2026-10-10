@@ -15,6 +15,7 @@ IMAGE_BYTES = b"\x89PNG fake image"
 class FakeComfy(object):
     def __init__(self, node_classes=()):
         self.node_classes = set(node_classes)   # custom nodes "installed"
+        self.object_info = {}                   # class -> spec, for combos
         self.prompts = {}                       # prompt_id -> workflow
         self.uploads = []                       # raw multipart bodies
         self.interrupted = False
@@ -45,6 +46,8 @@ class FakeComfy(object):
                     return self._send({"system": {}})
                 if path.startswith("/object_info/"):
                     cls = path.rsplit("/", 1)[1]
+                    if cls in fake.object_info:
+                        return self._send({cls: fake.object_info[cls]})
                     return self._send({cls: {}} if cls in fake.node_classes else {})
                 if path.startswith("/history/"):
                     pid = path.rsplit("/", 1)[1]
@@ -90,7 +93,7 @@ class FakeComfy(object):
     def history(self, wf):
         outputs = {}
         for nid, node in wf.items():
-            if node["_meta"]["title"] == "nuke_save":
+            if node["_meta"]["title"].startswith("nuke_save"):
                 outputs[nid] = {"images": [{"filename": "out_00001_.png",
                                             "subfolder": "nuke", "type": "output"}]}
             if node["class_type"] == "PreviewAny":

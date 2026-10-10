@@ -21,6 +21,7 @@ def reset():
     del messages[:]
     del _stack[:]
     _top.clear()
+    _menu.commands.clear()
     _root.script = "Root"
 
 
@@ -116,6 +117,17 @@ class Format_Knob(Knob):
 class Enumeration_Knob(Knob):
     def __init__(self, name, label, items):
         Knob.__init__(self, name, label, items[0])
+        self._items = list(items)
+
+    def values(self):
+        return list(self._items)
+
+    def setValues(self, items):
+        self._items = list(items)
+
+    def setValue(self, v):
+        if v in self._items:           # like real Nuke: unknown is ignored
+            self._value = v
 
 
 class PyScript_Knob(Knob):
@@ -168,6 +180,9 @@ class Node(object):
                 raise NameError("knob %s.%s does not exist" % (self._name, k))
             self.addKnob(Knob(k))
         return self._knobs[k]
+
+    def knob(self, k):
+        return self._knobs.get(k)
 
     def knobs(self):
         for k in _AUTO_KNOBS:
@@ -287,11 +302,15 @@ class _Menu(object):
     def __init__(self):
         self.commands = {}
 
-    def addMenu(self, name):
+    def addMenu(self, name, icon=None):
         return self
 
-    def addCommand(self, name, fn):
-        self.commands[name] = fn
+    def addCommand(self, name, command):
+        self.commands[name] = command
+
+    def run(self, name):
+        """Test helper: run a string command as Nuke would."""
+        exec(self.commands[name], {"nuke": __import__("nuke")})
 
 
 _menu = _Menu()
