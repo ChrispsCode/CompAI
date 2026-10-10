@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Mac
+.DS_Store
+.AppleDouble
+tab_stats.dat
+
+# VSCode
+.vscode/
+
+# pyenv
+
+
+# Other
+*.dat
+.idea
