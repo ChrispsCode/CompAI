@@ -16,17 +16,12 @@ Run ComfyUI workflows from Nuke nodes. You set the prompt, seed, format and inpu
 
 ## Install
 
-1. **Nuke side:** put the folder containing `comfy_client.py`, `comfy_nuke.py`, `comfy_nuke_edit.py` and `templates/` on `NUKE_PATH`, then add to `menu.py`:
-   ```python
-   import comfy_nuke, comfy_nuke_edit
-   nuke.menu("Nodes").addCommand("AI/ComfyGenerate", comfy_nuke.create)
-   nuke.menu("Nodes").addCommand("AI/ComfyEdit", comfy_nuke_edit.create)
-   ```
-2. **Comfy side (recommended):** copy `comfy_nuke_nodes/` into `ComfyUI/custom_nodes/` and restart ComfyUI. This lets Comfy read Nuke's images straight from disk instead of uploading copies.
+1. **Nuke side:** add the `nuke_plugin/` folder to Nuke's plugin path, either on `NUKE_PATH` or with `nuke.pluginAddPath("/path/to/CompAI/nuke_plugin")` in `~/.nuke/init.py`. The nodes appear under **Comfy** in the node menu.
+2. **Comfy side (recommended):** copy or symlink `comfyui_custom_nodes/comfy_nuke_nodes/` into `ComfyUI/custom_nodes/` and restart ComfyUI. This lets Comfy read Nuke's images straight from disk instead of uploading copies.
 
 ## ComfyGenerate (text → image)
 
-1. Create **AI › ComfyGenerate**.
+1. Create **Comfy › ComfyGenerate**.
 2. Type a prompt. Tick **enhance prompt** to have an LLM expand it first. This is slower, and the rewritten prompt appears on the *Results* tab.
 3. Set the **target format**. The image is generated at about **megapixels** (default 1 MP), at the same aspect ratio, then reformatted to the target. The *generate at* line shows both sizes.
 4. Set **output dir** and **name**, then press **Generate**. Nuke stays usable while it runs. **Cancel** stops the job.
@@ -34,7 +29,7 @@ Run ComfyUI workflows from Nuke nodes. You set the prompt, seed, format and inpu
 
 ## ComfyEdit (image edit / multi-reference)
 
-1. Create **AI › ComfyEdit** and connect 1–4 images. Unconnected inputs are skipped, and the connected ones are numbered in order.
+1. Create **Comfy › ComfyEdit** and connect 1–4 images. Unconnected inputs are skipped, and the connected ones are numbered in order.
 2. Write an instruction, e.g. *"replace the sky with a stormy sunset"*. With several inputs you can refer to them by number: *"put the jacket from image 2 on the person in image 1"*.
 3. By default the output matches the first input's format (**match first input's format**).
 4. Press **Generate**. Each input is grabbed at the **current frame**.
@@ -57,6 +52,8 @@ If the output dir doesn't resolve to an absolute path (e.g. an unset env var), f
 
 - **"ComfyUI not reachable"**: Comfy isn't running, or the host is wrong (*Settings* tab).
 - **"No node titled …"**: the template file doesn't match what the node expects. See the template rules in Part 2.
+- **"Workflow template not found"**: the path on the *Settings* tab doesn't exist. If only the folder is wrong (the tool was moved), a template with the same file name in this install's `templates/` is used automatically.
+- **Generate is greyed out with nothing running**: close and reopen the node's panel.
 - **Colours look off**: set **PNG colorspace** on the Edit node's *Settings* tab to your OCIO config's sRGB name.
 - **Errors from Comfy** show in a popup. The ComfyUI console has the full traceback.
 
@@ -65,6 +62,20 @@ If the output dir doesn't resolve to an absolute path (e.g. an unset env var), f
 # Part 2 — Developer guide (for Claude / future maintainers)
 
 This section is meant to bring a fresh session fully up to speed. Read it all before changing code.
+
+> ### ⚡ Real Nuke can be run headless from the shell. Use it.
+>
+> ```bash
+> /opt/Nuke15.2v9/Nuke15.2 -ti my_test.py 2>&1 | grep -v "^$"
+> ```
+>
+> - Runs `my_test.py` in real Nuke 15.2 with no GUI, in about 10 seconds. `-i` uses Harry's interactive licence, so it works while his GUI session is open. Nuke 17.1 is at `/opt/Nuke17.1v1`.
+> - Harry's `~/.nuke/init.py` runs, so `import comfy_nuke, comfy_nuke_edit` just works.
+> - **Good for:** creating nodes, checking knobs exist and take the values we set, expressions, formats, colourspace names, executing Writes, loading a result into the Read. Check every Nuke API assumption here before handing anything to Harry.
+> - **Not covered:** `menu.py` (not run in terminal mode), anything visual, panel behaviour, and the background-thread job flow. Harry tests those in the GUI.
+> - Don't override `HOME`: the licence lives there and Nuke won't start.
+> - Don't queue real generations on Harry's GPU from a test without asking.
+> - Put test scripts and their output in a scratch directory, not the repo.
 
 ## 1. Context and goals
 
@@ -87,14 +98,29 @@ Nuke node (knobs) ──HTTP──▶ ComfyUI server ──▶ GPU
 
 ## 3. Files
 
+```
+nuke_plugin/                 everything Nuke loads; this folder goes on the plugin path
+  menu.py                    registers the Comfy menu
+  comfy_client.py
+  comfy_nuke.py
+  comfy_nuke_edit.py
+  templates/                 the workflows the nodes run
+comfyui_custom_nodes/        installed into ComfyUI, not Nuke
+  comfy_nuke_nodes/
+reference_comfy_workflows/   Harry's Comfy exports, for reference only (not loaded)
+tests/                       offline tests, see §9
+```
+
 | File | Imports nuke? | Role |
 |---|---|---|
 | `comfy_client.py` | no (stdlib only) | HTTP client, template patching, image-slot binding, `generate()` / `generate_edit()`, CLI |
-| `comfy_nuke.py` | yes | **ComfyGenerate** (T2I) node, plus the shared job machinery (`start_job`, `_worker`, `_on_done`, `_status`, `_JOBS`) and helpers (`_generation_size`, `_output_dir`, `_next_output_path`) |
-| `comfy_nuke_edit.py` | yes | **ComfyEdit** node: writes Nuke inputs to PNG and reuses `comfy_nuke`'s job machinery |
+| `comfy_nuke.py` | yes | **ComfyGenerate** (T2I) node, plus everything the nodes share: knob groups (`prompt_knobs`, `seed_knobs`, `size_knobs`, `output_knobs`, `action_knobs`, `results_knobs`, `settings_knobs`), `add_output_chain`, the job machinery (`common_params`, `next_seed`, `start_job`, `_worker`, `_on_done`, `_status`, `_JOBS`) and helpers (`generation_size`, `output_dir`, `next_output_path`) |
+| `comfy_nuke_edit.py` | yes | **ComfyEdit** node: writes Nuke inputs to PNG and reuses `comfy_nuke`'s shared parts |
 | `comfy_nuke_nodes/__init__.py` | — (ComfyUI custom node) | `NukeLoadImagePath`: LoadImage from an absolute path |
 | `templates/basic_t2i_qwen_api_v002.json` | — | Qwen Image 2.1 text-to-image |
 | `templates/qwen_i2i_template_v002.json` | — | Qwen Image 2.1 edit, 10 image slots |
+
+The three modules are flat, top-level modules on purpose: knob callbacks are saved into scripts as strings (`import comfy_nuke; comfy_nuke.on_generate(...)`), so renaming or packaging them breaks every existing node.
 
 **Layering rule:** keep everything that doesn't need Nuke in `comfy_client.py`, or other nuke-free modules, so it can be tested from a shell. Nuke modules handle knobs, node graph and threading only.
 
@@ -140,7 +166,8 @@ Known template quirk: in the edit template, **Batch Images (feeding the prompt e
 - Read all knobs and execute all Writes on the **main thread** in `on_generate`. The worker thread only calls `comfy_client` functions.
 - The worker reports back via `nuke.executeInMainThread` (`_status`, `_on_done`, `_on_error`).
 - `_JOBS[node.fullName()] = threading.Event` is both the busy flag and the cancel flag (cancel → `/interrupt`).
-- `_on_done` / `_on_error` assume the node has these knobs: `generate`, `status`, `last_file`, `last_seed`, `used_prompt`, plus an internal `ComfyRead`. Any new node type that uses `start_job` must provide them.
+- `_on_done` / `_on_error` assume the node has these knobs: `generate`, `status`, `last_file`, `last_seed`, `used_prompt`, plus an internal `ComfyRead`. Any new node type that uses `start_job` must provide them; building it from the shared knob groups and `add_output_chain` does.
+- `start_job` disables the Generate button, and Nuke saves that state with the script. `release_stale_lock` re-enables it on `showPanel` when no job is running, so a script saved mid-job doesn't stay locked.
 - If the node is deleted mid-job, `nuke.toNode(key)` returns None and the result is dropped quietly.
 
 **Edit node specifics**: each input `imgN → prepN (Reformat to box, distort) → writeN (png, 8 bit, rgb, disabled except while executing)`.
@@ -150,13 +177,17 @@ Known template quirk: in the edit template, **Batch Images (feeding the prompt e
 - **Recursion guard:** `_IN_REFRESH` stops `knobChanged` from recursing when code sets knobs.
 - **Colourspace:** `_set_colorspace` tries `SRGB_CANDIDATES` against the Read/Write `colorspace` knob values, or uses the *PNG colorspace* override.
 
-**Versioning**: `_next_output_path` scans for `<name>_vNNN.png` and takes max+1. Input PNGs (`_in1`) and sidecars don't match the pattern, so they don't affect numbering.
+**Versioning**: `next_output_path` scans for `<name>_vNNN.png` and takes max+1. Input PNGs (`_in1`) and sidecars don't match the pattern, so they don't affect numbering.
 
-**Output dir**: `_output_dir` falls back to `~/comfy_nuke` only when the evaluated path is empty or not absolute, or when it's the `root.name` default in an unsaved script. An earlier version ignored user paths in unsaved scripts; that was a bug, now fixed.
+**Output dir**: `output_dir` falls back to `~/comfy_nuke` only when the evaluated path is empty or not absolute, or when it's the `root.name` default in an unsaved script. An earlier version ignored user paths in unsaved scripts; that was a bug, now fixed.
+
+**Template path**: the knob stores an absolute path. `resolve_template` uses it if it exists, else a same-named file in this install's `templates/`, so nodes created before the tool was moved keep working.
 
 ## 6. Nuke API notes learned the hard way (from Harry's fixes)
 
 - `node.setName(name)` has **no** `uncollisionable` argument.
+- `Format_Knob.setValue()` only accepts the **name** of a registered format. Passing a `Format` object does nothing except log "not in named format list", and raises no exception. For an unnamed format, register it with `nuke.addFormat("w h pa name")` first (adding the same one twice is harmless). See `comfy_nuke_edit._set_format`.
+- Don't rely on a chained `init.py`: with `nuke.pluginAddPath("/…/CompAI/")` in `~/.nuke/init.py`, Nuke 15.2 added the path but never ran `CompAI/init.py` (it did run when the same folder was on `NUKE_PATH`; cause not found). Pointing the plugin path straight at `nuke_plugin/` needs no `init.py`.
 - Format knobs **can** be expression-linked: `reformat["format"].setExpression("parent.target_format")`. Use this rather than syncing in `knobChanged`.
 - Harry's preferred default output dir is `[getenv SHOT_ROOT]/gen`.
 - Callbacks are stored as strings like `"import comfy_nuke; comfy_nuke.on_generate(nuke.thisNode())"`, so existing nodes pick up code changes after `importlib.reload`.
@@ -168,7 +199,7 @@ Harry wants the structure to stay fluid until a few more workflow types exist. D
 
 - **One node class per workflow *type*** (T2I, Edit, later Video, Upscale…) is Harry's current leaning. The shared machinery already lives in `comfy_nuke.py`.
 - **Generic, manifest-driven alternative:** a `manifest.json` next to each workflow lists `params` (knob → [(title, input), …], type, default, range) and `roles` (seed, size, inputs, output). A single generic builder would create knobs from it, and `/object_info` could validate bindings and supply ranges or enums. Floated, not adopted.
-- **Duplicated code:** `build_qwen_t2i` / `build_qwen_edit` are Qwen-specific in name but mostly generic. They'll likely merge once a non-Qwen template arrives.
+- **Qwen-specific builders:** `build_qwen_t2i` / `build_qwen_edit` are Qwen-specific in name but mostly generic (the shared part is `_patch_common`). They'll likely generalise once a non-Qwen template arrives.
 - **Template library:** a library path (e.g. a `COMFY_NUKE_TEMPLATES` env var) plus menu entries generated by scanning it.
 - **Validation on node creation:** check that every expected `nuke_` title and input exists, so failures show up early rather than mid-render.
 - **Colour:** the pipeline is 8-bit sRGB PNG both ways for now. Worth exploring: `SaveImageAdvanced` has `format.bit_depth` and colour-space options, so 16-bit output may be possible, and how display-referred AI output should sit in a scene-linear comp.
@@ -179,28 +210,30 @@ Harry wants the structure to stay fluid until a few more workflow types exist. D
 
 | Piece | Status |
 |---|---|
-| `comfy_client` T2I via CLI | ✅ tested by Harry against live Comfy |
-| ComfyGenerate node in Nuke | ✅ tested by Harry |
+| `comfy_client` T2I via CLI | ✅ tested by Harry against live Comfy (before the Oct 2026 restructure) |
+| ComfyGenerate node in Nuke | ✅ tested by Harry before the restructure; ⚠️ not yet re-tested since. Logic is unchanged, but knob creation and `on_generate` now go through the shared helpers |
 | Output dir fix | ✅ tested by Harry |
-| `bind_images` / pruning / path-swap logic | ✅ tested offline against the real edit template (no dangling links) |
-| `upload_image`, `has_node`, `generate_edit` against live Comfy | ⚠️ untested |
-| `NukeLoadImagePath` custom node | ⚠️ untested (written against ComfyUI's legacy node API) |
-| ComfyEdit node in Nuke | ⚠️ untested. Least certain: `Format_Knob.setValue(Format)` in "match input", and Write colourspace names under Harry's OCIO config |
+| Template patching, pruning, path-swap | ✅ offline tests against the real templates (no dangling links for 1–10 images) |
+| Both templates vs live Comfy `/object_info` | ✅ every node class and input name exists on Harry's server (ComfyUI 0.38.1). Model files not checked |
+| Client flow, both nodes end to end | ✅ offline only, against a fake Comfy server and a fake `nuke` module (`tests/`). Proves our own logic, not the real APIs |
+| `upload_image`, `generate_edit` against live Comfy | ⚠️ untested |
+| `NukeLoadImagePath` custom node | ⚠️ untested and not installed on Harry's Comfy yet (written against ComfyUI's legacy node API) |
+| Both nodes in real Nuke 15.2, headless (`-t`), no generation | ✅ creation, knobs, format expression link, "match input" for named and unnamed formats, writing an input PNG (sRGB picked under the default config), loading a result into the Read |
+| ComfyEdit in the Nuke GUI, end to end with Comfy | ⚠️ untested. Still open: Write colourspace names under Harry's OCIO config |
+| `menu.py` in the GUI | ⚠️ untested by Claude (terminal mode doesn't run `menu.py`); imports are confirmed |
 
-## 9. Testing without Nuke or Comfy
+## 9. Offline tests
 
 ```bash
-# import / syntax check the Nuke modules with a stub
-mkdir -p stub && printf 'STARTLINE=1\n' > stub/nuke.py
-PYTHONPATH=stub python3 -c "import comfy_nuke, comfy_nuke_edit"
+# everything offline: patching, client vs a fake Comfy server, nodes vs a fake nuke
+python3 -m unittest discover -s tests
 
-# patch a template offline and inspect it
-python3 -c "import comfy_client as c; wf,_=c.build_qwen_edit(c.load_template('templates/qwen_i2i_template_v002.json'), 'x', ['/a.png'], 1024, 1024, image_mode='path'); print(wf['459_474']['inputs'])"
-
-# live runs (Comfy up)
+# live runs (Comfy up), from nuke_plugin/
 python3 comfy_client.py templates/basic_t2i_qwen_api_v002.json --prompt "a ring in a box" --width 1408 --height 736 --out ./t2i_v001.png
 python3 comfy_client.py templates/qwen_i2i_template_v002.json --prompt "make it night" --image ./plate.png --width 1024 --height 1024 --input-mode path --out ./edit_v001.png
 ```
+
+`tests/nuke_stub/nuke.py` is a hand-written fake that models only what our code calls. A test passing there says nothing about whether real Nuke accepts the call, so anything touching knobs or the node graph needs a run in real Nuke. Run those headless in real Nuke first (see the box at the top of Part 2). When the stub turns out to disagree with real Nuke, fix the stub too. `tests/fake_comfy.py` is the same idea for the HTTP API.
 
 Useful Comfy endpoints: `/prompt`, `/history/<id>`, `/view`, `/upload/image`, `/interrupt`, `/system_stats`, `/object_info[/<class>]`.
 
@@ -209,5 +242,5 @@ Useful Comfy endpoints: `/prompt`, `/history/<id>`, `/view`, `/upload/image`, `/
 1. Build and test it in ComfyUI.
 2. Title the patch points per §4 and add `nuke_save`. Export with **Save (API)** into `templates/`.
 3. Add a `build_<type>()` (and `generate_<type>()` if the flow differs) to `comfy_client.py`. Test from the CLI against live Comfy.
-4. Add a Nuke node module modelled on `comfy_nuke_edit.py`: knobs, main-thread prep, then `base.start_job(node, params, fn, summary)`.
-5. Update this README: the title table (§4), status (§8), and any new lessons (§6).
+4. Add a Nuke node module modelled on `comfy_nuke_edit.py`: build the knobs from the shared groups in `comfy_nuke`, do main-thread prep, then `base.start_job(node, params, fn, summary)`. Register it in `menu.py`.
+5. Add offline tests to `tests/test_comfy.py`, and update this README: the title table (§4), status (§8), and any new lessons (§6).

@@ -1,0 +1,156 @@
+{
+  "10": {
+    "inputs": {
+      "value": ""
+    },
+    "class_type": "PrimitiveStringMultiline",
+    "_meta": {
+      "title": "nuke_prompt"
+    }
+  },
+  "11": {
+    "inputs": {
+      "filename_prefix": "ComfyUI",
+      "format": "png",
+      "format.bit_depth": "8-bit",
+      "format.input_color_space": "sRGB",
+      "images": [
+        "57_8",
+        0
+      ]
+    },
+    "class_type": "SaveImageAdvanced",
+    "_meta": {
+      "title": "nuke_save_image"
+    }
+  },
+  "57_30": {
+    "inputs": {
+      "clip_name": "qwen_3_4b.safetensors",
+      "type": "lumina2",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "Load CLIP"
+    }
+  },
+  "57_29": {
+    "inputs": {
+      "vae_name": "ae.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "Load VAE"
+    }
+  },
+  "57_28": {
+    "inputs": {
+      "unet_name": "z_image_turbo_int8_convrot.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "nuke_load_diffusion_model"
+    }
+  },
+  "57_13": {
+    "inputs": {
+      "width": 1024,
+      "height": 1024,
+      "batch_size": 1
+    },
+    "class_type": "EmptySD3LatentImage",
+    "_meta": {
+      "title": "nuke_latent"
+    }
+  },
+  "57_11": {
+    "inputs": {
+      "shift": 3,
+      "sampling": "flow",
+      "model": [
+        "57_28",
+        0
+      ]
+    },
+    "class_type": "ModelSamplingAuraFlow",
+    "_meta": {
+      "title": "ModelSamplingAuraFlow"
+    }
+  },
+  "57_27": {
+    "inputs": {
+      "text": [
+        "10",
+        0
+      ],
+      "clip": [
+        "57_30",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Prompt)"
+    }
+  },
+  "57_33": {
+    "inputs": {
+      "conditioning": [
+        "57_27",
+        0
+      ]
+    },
+    "class_type": "ConditioningZeroOut",
+    "_meta": {
+      "title": "Conditioning Zero Out"
+    }
+  },
+  "57_3": {
+    "inputs": {
+      "seed": 0,
+      "steps": 8,
+      "cfg": 1,
+      "sampler_name": "res_multistep",
+      "scheduler": "simple",
+      "denoise": 1,
+      "model": [
+        "57_11",
+        0
+      ],
+      "positive": [
+        "57_27",
+        0
+      ],
+      "negative": [
+        "57_33",
+        0
+      ],
+      "latent_image": [
+        "57_13",
+        0
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "nuke_ksampler"
+    }
+  },
+  "57_8": {
+    "inputs": {
+      "samples": [
+        "57_3",
+        0
+      ],
+      "vae": [
+        "57_29",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE Decode"
+    }
+  }
+}

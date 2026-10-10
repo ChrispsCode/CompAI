@@ -7,8 +7,8 @@ Workflow templates are API-format exports ("Save (API)") whose patchable
 nodes carry `nuke_*` titles. Nodes are found by title, never by ID, so
 re-exporting the template doesn't break anything.
 
-CLI test:
-    python comfy_client.py basic_t2i_qwen_api_v002.json \
+CLI test (add --image plate.png, repeatable, to run an edit template):
+    python comfy_client.py templates/basic_t2i_qwen_api_v002.json \
         --prompt "An engagement ring in a ring box. Plain grey background." \
         --width 1408 --height 736 --out ./ring_v001.png
 """
@@ -119,50 +119,47 @@ def generation_size(target_w, target_h, megapixels=1.0, multiple=16):
     return snap(w), snap(h)
 
 
-def build_qwen_t2i(template, prompt, width, height, seed=None, steps=None,
-                   enhance=False, filename_prefix="nuke/qwen"):
-    """Patch a copy of the Qwen t2i template. Returns (workflow, seed)."""
-    wf = copy.deepcopy(template)
+def _patch_common(wf, prompt, seed, steps, enhance, filename_prefix):
+    """Patch the nodes every Qwen template shares. Returns the seed used."""
     if seed is None:
         seed = random.randint(0, 2**32 - 1)
-
     set_input(wf, "nuke_prompt", "value", prompt)
     set_input(wf, "nuke_enhance_switch", "switch", bool(enhance))
     set_input(wf, "nuke_ksampler", "seed", int(seed))
     set_input(wf, "nuke_generate_text", "sampling_mode.seed", int(seed))
     if steps is not None:
         set_input(wf, "nuke_ksampler", "steps", int(steps))
+    set_input(wf, "nuke_save", "filename_prefix", filename_prefix)
+    return seed
+
+
+def build_qwen_t2i(template, prompt, width, height, seed=None, steps=None,
+                   enhance=False, filename_prefix="nuke/qwen"):
+    """Patch a copy of the Qwen t2i template. Returns (workflow, seed)."""
+    wf = copy.deepcopy(template)
+    seed = _patch_common(wf, prompt, seed, steps, enhance, filename_prefix)
     set_input(wf, "nuke_latent", "width", int(width))
     set_input(wf, "nuke_latent", "height", int(height))
-    set_input(wf, "nuke_save", "filename_prefix", filename_prefix)
     return wf, seed
 
 
 def build_qwen_edit(template, prompt, images, width=None, height=None,
                     seed=None, steps=None, enhance=False, image_mode="upload",
                     filename_prefix="nuke/qwen_edit"):
-    """Patch a copy of the Qwen edit template. images are upload names or
-    absolute paths (see bind_images / image_mode), in slot order. If width/height are
-    given, nuke_size_switch routes the Empty Latent in; otherwise the output
-    follows reference image 1's size."""
+    """Patch a copy of the Qwen edit template. Returns (workflow, seed).
+
+    images are upload names or absolute paths (see bind_images / image_mode),
+    in slot order. If width/height are given, nuke_size_switch routes the
+    Empty Latent in; otherwise the output follows reference image 1's size."""
     if not images:
         raise ComfyError("Edit template needs at least one input image")
     wf = copy.deepcopy(template)
-    if seed is None:
-        seed = random.randint(0, 2**32 - 1)
-
-    set_input(wf, "nuke_prompt", "value", prompt)
-    set_input(wf, "nuke_enhance_switch", "switch", bool(enhance))
-    set_input(wf, "nuke_ksampler", "seed", int(seed))
-    set_input(wf, "nuke_generate_text", "sampling_mode.seed", int(seed))
-    if steps is not None:
-        set_input(wf, "nuke_ksampler", "steps", int(steps))
+    seed = _patch_common(wf, prompt, seed, steps, enhance, filename_prefix)
     explicit = width is not None and height is not None
     set_input(wf, "nuke_size_switch", "switch", explicit)
     if explicit:
         set_input(wf, "nuke_latent", "width", int(width))
         set_input(wf, "nuke_latent", "height", int(height))
-    set_input(wf, "nuke_save", "filename_prefix", filename_prefix)
     bind_images(wf, images, mode=image_mode)
     return wf, seed
 
@@ -235,7 +232,7 @@ class ComfyClient:
         try:
             info = self._get_json("/object_info/" + urllib.parse.quote(class_type))
             return class_type in info
-        except (urllib.error.URLError, ValueError):
+        except (OSError, ValueError):     # URLError is an OSError
             return False
 
     def upload_image(self, path, subfolder="nuke", name=None, overwrite=True):

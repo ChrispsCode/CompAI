@@ -8,20 +8,17 @@ handed to Comfy - by path if the NukeLoadImagePath custom node is installed,
 otherwise uploaded. Inputs are packed in order: connect img1 and img3 and
 they become slots 1 and 2.
 
-menu.py:
-    import comfy_nuke_edit
-    nuke.menu("Nodes").addCommand("AI/ComfyEdit", comfy_nuke_edit.create)
+Install: see README. Nodes are registered in menu.py.
 """
 
 import os
-import random
 
 import nuke
 
 import comfy_client
 import comfy_nuke as base
 
-DEFAULT_TEMPLATE = os.path.join(base.HERE, "templates", "qwen_i2i_template_v002.json")
+DEFAULT_TEMPLATE = os.path.join(base.TEMPLATE_DIR, "qwen_i2i_template_v002.json")
 NUM_INPUTS = 4
 
 # Tried in order against the Write/Read colorspace knob. Covers nuke-default,
@@ -59,106 +56,41 @@ def create(num_inputs=NUM_INPUTS):
         w["disable"].setValue(True)        # only enabled while we execute it
         _set_colorspace(w, "")
 
-    read = nuke.nodes.Read(name="ComfyRead")
-    read["before"].setValue("hold")
-    read["after"].setValue("hold")
-    read["on_error"].setValue("black")
-    _set_colorspace(read, "")
-    reformat = nuke.nodes.Reformat(name="ToTarget", inputs=[read])
-    reformat["resize"].setValue("fill")
-    reformat["filter"].setValue("Lanczos4")
-    reformat["black_outside"].setValue(True)
-    reformat["format"].setExpression("parent.target_format")
-    reformat["pbb"].setValue(True)
-    nuke.nodes.Output(inputs=[reformat])
+    _set_colorspace(base.add_output_chain(), "")
     g.end()
     g["knobChanged"].setValue("import comfy_nuke_edit; comfy_nuke_edit.on_knob_changed()")
-
-    k = []
-    k.append(nuke.Tab_Knob("comfy", "Comfy"))
-    prompt = nuke.Multiline_Eval_String_Knob("prompt", "prompt")
-    prompt.setTooltip("Edit instruction. With several inputs you can refer to "
-                      "them in order, e.g. 'put the jacket from image 2 on the "
-                      "person in image 1'.")
-    k.append(prompt)
-    en = nuke.Boolean_Knob("enhance", "enhance prompt")
-    en.setTooltip("Rewrite the instruction with the Qwen 3.5 LLM, which also "
-                  "looks at the input images. Slower.")
-    en.setFlag(nuke.STARTLINE)
-    k.append(en)
-
-    k.append(nuke.Text_Knob("div1", ""))
-    seed = nuke.Int_Knob("seed", "seed")
-    seed.setValue(1)
-    k.append(seed)
-    rs = nuke.Boolean_Knob("random_seed", "new seed each run")
-    rs.setValue(True)
-    rs.clearFlag(nuke.STARTLINE)
-    k.append(rs)
-    steps = nuke.Int_Knob("steps", "steps")
-    steps.setValue(25)
-    k.append(steps)
 
     mi = nuke.Boolean_Knob("match_input", "match first input's format")
     mi.setValue(True)
     mi.setFlag(nuke.STARTLINE)
-    k.append(mi)
-    fmt = nuke.Format_Knob("target_format", "target format")
-    k.append(fmt)
-    mp = nuke.Double_Knob("megapixels", "megapixels")
-    mp.setRange(0.25, 2.5)
-    mp.setValue(1.0)
-    mp.setTooltip("Budget for the generated image and for each reference "
-                  "image sent to Comfy (each keeps its own aspect).")
-    k.append(mp)
-    k.append(nuke.Text_Knob("gen_size", "generate at", ""))
-    k.append(nuke.Text_Knob("inputs_info", "inputs", ""))
-
-    k.append(nuke.Text_Knob("div2", ""))
-    out = nuke.File_Knob("output_dir", "output dir")
-    out.setValue("[getenv SHOT_ROOT]/gen")
-    k.append(out)
-    name = nuke.String_Knob("out_name", "name")
-    name.setValue("edit")
-    k.append(name)
-
-    k.append(nuke.Text_Knob("div3", ""))
-    gen = nuke.PyScript_Knob("generate", "  Generate  ",
-                             "import comfy_nuke_edit; comfy_nuke_edit.on_generate(nuke.thisNode())")
-    gen.setFlag(nuke.STARTLINE)
-    k.append(gen)
-    k.append(nuke.PyScript_Knob("cancel", "Cancel",
-                                "import comfy_nuke; comfy_nuke.on_cancel(nuke.thisNode())"))
-    k.append(nuke.PyScript_Knob("reuse_seed", "Reuse last seed",
-                                "import comfy_nuke; comfy_nuke.on_reuse_seed(nuke.thisNode())"))
-    k.append(nuke.Text_Knob("status", "status", "idle"))
-
-    k.append(nuke.Tab_Knob("results", "Results"))
-    k.append(nuke.Text_Knob("last_file", "last file", ""))
-    k.append(nuke.Int_Knob("last_seed", "last seed"))
-    used = nuke.Multiline_Eval_String_Knob("used_prompt", "used prompt")
-    used.setTooltip("The instruction that actually reached the image model.")
-    k.append(used)
-
-    k.append(nuke.Tab_Knob("settings", "Settings"))
-    tmpl = nuke.File_Knob("template", "workflow template")
-    tmpl.setValue(DEFAULT_TEMPLATE)
-    k.append(tmpl)
-    host = nuke.String_Knob("host", "comfy host")
-    host.setValue(base.DEFAULT_HOST)
-    k.append(host)
     mode = nuke.Enumeration_Knob("input_mode", "image transfer",
                                  ["auto", "path", "upload"])
     mode.setTooltip("path: Comfy reads the PNGs where Nuke wrote them (needs "
                     "the NukeLoadImagePath custom node and a shared disk).\n"
                     "upload: copy them into Comfy's input dir.\n"
                     "auto: path if the custom node is installed.")
-    k.append(mode)
     cs = nuke.String_Knob("png_colorspace", "PNG colorspace", "")
     cs.setTooltip("Colorspace for the PNGs sent to Comfy and the result read "
                   "back. Empty = first sRGB match in the current OCIO config.")
-    k.append(cs)
 
+    k = [nuke.Tab_Knob("comfy", "Comfy")]
+    k += base.prompt_knobs(
+        prompt_tip="Edit instruction. With several inputs you can refer to "
+                   "them in order, e.g. 'put the jacket from image 2 on the "
+                   "person in image 1'.",
+        enhance_tip="Rewrite the instruction with the Qwen 3.5 LLM, which also "
+                    "looks at the input images. Slower.")
+    k += base.seed_knobs()
+    k += [mi]
+    k += base.size_knobs(
+        megapixels_tip="Budget for the generated image and for each reference "
+                       "image sent to Comfy (each keeps its own aspect).")
+    k += [nuke.Text_Knob("inputs_info", "inputs", "")]
+    k += base.output_knobs("edit")
+    k += base.action_knobs("comfy_nuke_edit")
+    k += base.results_knobs("The instruction that actually reached the image model.")
+    k += base.settings_knobs(DEFAULT_TEMPLATE)
+    k += [mode, cs]
     for knob in k:
         g.addKnob(knob)
 
@@ -185,21 +117,15 @@ def on_knob_changed():
     if name in ("target_format", "megapixels", "match_input",
                 "inputChange", "showPanel"):
         _refresh(node)
+    if name == "showPanel":
+        base.release_stale_lock(node)
 
 
 def on_generate(node):
-    key = node.fullName()
-    if key in base._JOBS:
-        nuke.message("A generation is already running on this node.")
+    if base.is_busy(node):
         return
-
-    prompt = node["prompt"].value().strip()
-    if not prompt:
-        nuke.message("Enter an edit instruction first.")
-        return
-    template_path = node["template"].evaluate()
-    if not os.path.isfile(template_path):
-        nuke.message("Workflow template not found:\n" + template_path)
+    params = base.common_params(node, "Enter an edit instruction first.")
+    if params is None:
         return
 
     connected = _connected_inputs(node)
@@ -207,7 +133,8 @@ def on_generate(node):
         nuke.message("Connect at least one image input.")
         return
     try:
-        slots = len(comfy_client.image_slots(comfy_client.load_template(template_path)))
+        slots = len(comfy_client.image_slots(
+            comfy_client.load_template(params["template_path"])))
     except Exception as e:
         nuke.message("Couldn't read template:\n%s" % e)
         return
@@ -217,11 +144,9 @@ def on_generate(node):
         return
 
     _refresh(node)
-    if node["random_seed"].value():
-        node["seed"].setValue(random.randint(0, 2**31 - 1))
-    seed = int(node["seed"].value())
-    w, h = base._generation_size(node)
-    out_path = base._next_output_path(node)
+    seed = base.next_seed(node)
+    w, h = base.generation_size(node)
+    out_path = base.next_output_path(node)
     stem = os.path.splitext(out_path)[0]
 
     # Write the reference PNGs (main thread, current frame)
@@ -236,12 +161,8 @@ def on_generate(node):
         nuke.message("Failed writing input images:\n%s" % e)
         return
 
-    params = dict(template_path=template_path, prompt=prompt, images=images,
-                  out_path=out_path, width=w, height=h, seed=seed,
-                  steps=int(node["steps"].value()),
-                  enhance=bool(node["enhance"].value()),
-                  host=node["host"].value().strip() or base.DEFAULT_HOST,
-                  input_mode=node["input_mode"].value(),
+    params.update(images=images, out_path=out_path, width=w, height=h,
+                  seed=seed, input_mode=node["input_mode"].value(),
                   upload_names=["%s_in%d.png" % (node.name(), s)
                                 for s in range(1, len(images) + 1)])
     base.start_job(node, params, comfy_client.generate_edit,
@@ -292,20 +213,29 @@ def _refresh(node):
 def _do_refresh(node):
     connected = _connected_inputs(node)
     if node["match_input"].value() and connected:
-        fmt = node.input(connected[0]).format()
-        try:
-            node["target_format"].setValue(fmt)
-        except Exception:
-            if fmt.name():
-                node["target_format"].setValue(fmt.name())
+        _set_format(node["target_format"], node.input(connected[0]).format())
     node["target_format"].setEnabled(not node["match_input"].value())
-    base._update_gen_size(node)
+    base.update_gen_size(node)
     if connected:
         node["inputs_info"].setValue(
             ", ".join("img%d" % (i + 1) for i in connected)
             + "  ->  slot(s) 1-%d" % len(connected))
     else:
         node["inputs_info"].setValue("<font color=#e0a96c>none connected</font>")
+
+
+def _set_format(knob, fmt):
+    """Point a Format_Knob at fmt. The knob only accepts the name of a
+    registered format (a Format object is ignored with a warning), so an
+    unnamed format, e.g. from a Crop or a to-box Reformat, is registered."""
+    name = fmt.name()
+    if not name:
+        name = "comfy_%dx%d" % (fmt.width(), fmt.height())
+        if fmt.pixelAspect() != 1:
+            name += "_pa%g" % fmt.pixelAspect()
+        nuke.addFormat("%d %d %g %s" % (fmt.width(), fmt.height(),
+                                        fmt.pixelAspect(), name))
+    knob.setValue(name)
 
 
 def _set_colorspace(n, preferred):
