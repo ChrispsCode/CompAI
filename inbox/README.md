@@ -15,6 +15,7 @@ Drop a ComfyUI export in this folder and ask Claude to "ingest the inbox". It ge
    | `nuke_save` (or `nuke_save_anything`) | the one node that saves the final image | where Nuke picks up the result |
    | `nuke_input_1`, `nuke_input_2`, … | stock Load Image nodes, numbered with no gaps | a variable number of images from Nuke |
    | `nuke_first_frame`, `nuke_last_frame`, … | stock Load Image nodes with a name instead of a number | fixed, named inputs on the Nuke node (first / last), each optional |
+   | `nuke_video_1`, `nuke_video_2`, … | stock Load Video nodes, numbered with no gaps | video inputs on the Nuke node (vid1, vid2 …), written out from Nuke as movies |
    | `nuke_whatever_you_like` | any other node with a setting you want as a knob | e.g. `nuke_load_diffusion_model` for a model dropdown |
 
 3. Export with **Save (API)**, not the normal save, and put the `.json` here.
@@ -30,7 +31,7 @@ You don't need to say which settings become knobs in the export. Mention it when
 - It's a normal save, not **Save (API)**.
 - No save node titled `nuke_save…`, or more than one.
 - Two nodes share a `nuke_` title.
-- A Load Image node without a `nuke_` title (its file would be baked in), or gaps in `nuke_input_N` numbering.
+- A Load Image or Load Video node without a `nuke_` title (its file would be baked in), or gaps in `nuke_input_N` / `nuke_video_N` numbering.
 - A node type or model file that the running ComfyUI doesn't have.
 
 Check one yourself any time: `python3 workflow.py check inbox/my_export.json`

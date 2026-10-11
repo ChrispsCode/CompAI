@@ -19,6 +19,8 @@ _frame = 1001
 
 def reset():
     del messages[:]
+    del executed[:]
+    del answers[:]
     del _stack[:]
     _top.clear()
     _menu.commands.clear()
@@ -167,7 +169,8 @@ File_Knob = Multiline_Eval_String_Knob = String_Knob
 _AUTO_KNOBS = ("before after on_error resize filter black_outside format pbb "
                "type box_fixed box_width box_height file_type channels "
                "datatype create_directories disable colorspace file reload "
-               "first last frame_mode frame "
+               "first last frame_mode frame mov64_codec mov64_fps "
+               "mov_prores_codec_profile "
                "tile_color knobChanged").split()
 
 
@@ -186,6 +189,12 @@ class Node(object):
             self._name = "%s%d" % (cls, n)
         self._format = Format()
         self._xy = (0, 0)
+        self.first_frame, self.last_frame = 1001, 1048
+        if cls == "Input":             # like Nuke: takes the lowest free number
+            taken = set(n["number"].value() for n in _current().values()
+                        if n.cls == "Input" and n is not self)
+            self.addKnob(Knob("number", value=min(
+                i for i in range(len(taken) + 1) if i not in taken)))
         (self._parent.children if self._parent else _top)[self._name] = self
 
     def __getitem__(self, k):
@@ -235,7 +244,13 @@ class Node(object):
         return len(self._inputs)
 
     def input(self, i):
-        return self._inputs[i]
+        return self._inputs[i] if i < len(self._inputs) else None
+
+    def firstFrame(self):
+        return self.first_frame
+
+    def lastFrame(self):
+        return self.last_frame
 
     def setInput(self, i, node):
         while len(self._inputs) <= i:
@@ -308,6 +323,14 @@ def message(text):
     messages.append(text)
 
 
+answers = []           # queued replies for nuke.ask(); default is yes
+
+
+def ask(text):
+    messages.append(text)
+    return answers.pop(0) if answers else True
+
+
 def executeInMainThread(fn, args=()):
     fn(*args)
 
@@ -316,8 +339,12 @@ def frame():
     return _frame
 
 
+executed = []          # (file, first, last) for every nuke.execute()
+
+
 def execute(write, first, last):
     path = write["file"].value()
+    executed.append((path, first, last))
     with open(path, "wb") as f:
         f.write(b"fake png")
 
@@ -329,8 +356,16 @@ class _Root(object):
     first_frame = 1001
     fps = 24.0
 
+    last_frame = 1100
+
     def __getitem__(self, k):
         return Knob(k, value=getattr(self, k))
+
+    def firstFrame(self):
+        return self.first_frame
+
+    def lastFrame(self):
+        return self.last_frame
 
     def name(self):
         return self.script

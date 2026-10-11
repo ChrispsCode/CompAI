@@ -58,13 +58,24 @@ def set_input(workflow, title, key, value):
 
 
 def remove_node(workflow, node_id):
-    """Delete a node and every link that points at it."""
+    """Delete a node and every link that points at it.
+
+    A node left with no inputs at all by that was only passing the deleted
+    node along (Get Video Components after a Load Video, say) and can't run,
+    so it is deleted too. nuke_ nodes are never removed this way."""
     workflow.pop(node_id, None)
-    for node in workflow.values():
+    for nid in list(workflow):
+        node = workflow.get(nid)
+        if node is None:               # went in a cascade below
+            continue
         inputs = node.get("inputs", {})
-        for key in [k for k, v in inputs.items()
-                    if isinstance(v, list) and len(v) == 2 and v[0] == node_id]:
+        dead = [k for k, v in inputs.items()
+                if isinstance(v, list) and len(v) == 2 and v[0] == node_id]
+        for key in dead:
             del inputs[key]
+        title = node.get("_meta", {}).get("title", "")
+        if dead and not inputs and not title.startswith("nuke_"):
+            remove_node(workflow, nid)
 
 
 def image_slots(workflow, prefix="nuke_input_"):

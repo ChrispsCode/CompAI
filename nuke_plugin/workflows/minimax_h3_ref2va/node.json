@@ -1,0 +1,72 @@
+{
+  "label": "Minimax_H3_ref2va",
+  "node_name": "MiniMaxRefVideo",
+  "tile_color": "0x8C3F6BFF",
+  "notes": [
+    "workflow.json is the source of truth (Harry continues from it, not from his original export). Claude's edits to the original, none of them run in ComfyUI before the first generation from Nuke:",
+    "1. Titles added: 92 nuke_save_video, 137 nuke_input_1, 139 nuke_input_2, 129 nuke_random_noise, 132 nuke_duration, 136 nuke_ref_to_video, 143 nuke_steps, 144 nuke_lightning_steps, 146 nuke_enable_lightning_LoRA.",
+    "2. Added Load Image nodes 147-153 titled nuke_input_3..9, wired to ref_images.ref_image_2..8 on nuke_ref_to_video (the node accepts up to 9 reference images; the export had 2).",
+    "3. Added PrimitiveFloat node 154 titled nuke_fps (24), wired to fps on Create Video (130) and to values.b on the Math Expression (131), whose expression now uses 'a * b' where it had 'a * 24'.",
+    "4. Harry then re-exported from that file (2026-10-11) adding Load Video nodes 155/157/159 (nuke_video_1..3), each through a Get Video Components node into ref_videos.ref_video_0..2. That export is installed unedited.",
+    "Left alone, for Harry to decide: BasicScheduler (124) takes its model straight from Load Diffusion Model (127), not from the LoRA switch (141) as the first/last-frame workflow does."
+  ],
+  "output": "nuke_save_video",
+  "out_name": "video",
+  "timeout": 3600,
+  "size": {"multiple": 32, "megapixels": 0.4, "megapixels_range": [0.2, 1.2]},
+  "bind": {
+    "prompt": [["nuke_prompt", "value"]],
+    "seed": [["nuke_random_noise", "noise_seed"]],
+    "width": [["nuke_ref_to_video", "width"]],
+    "height": [["nuke_ref_to_video", "height"]]
+  },
+  "images": {"max": 9, "min": 0, "match_format": false, "resize": false},
+  "videos": {"max": 3},
+  "knobs": [
+    {
+      "name": "duration",
+      "label": "duration (s)",
+      "type": "float",
+      "default": 2,
+      "range": [1, 15],
+      "tooltip": "Length in seconds. The frame count is duration x fps, rounded up to the model's grid (5, 22, 39, 56 ... frames). The model was trained on about 5 to 15 s at 24 fps.",
+      "bind": [["nuke_duration", "value"]]
+    },
+    {
+      "name": "fps",
+      "type": "float",
+      "range": [12, 60],
+      "expression": "root.fps",
+      "tooltip": "Frame rate of the clip. Linked to the project's fps; remove the expression to set it by hand. The model was trained at 24 fps: at other rates motion plays slightly faster or slower, and the audio track no longer matches the picture's length.",
+      "bind": [["nuke_fps", "value"]]
+    },
+    {
+      "name": "ref_size",
+      "label": "reference size",
+      "type": "choice",
+      "options": ["match", "max"],
+      "tooltip": "match: each reference is scaled down to the generation's pixel area.\nmax: references are used at up to 2048 px on the short edge for the best likeness, which can be several times slower. Nuke sends each reference at its own resolution, so the choice is made by the model.",
+      "bind": [["nuke_ref_to_video", "ref_image_size"]]
+    },
+    {
+      "name": "steps",
+      "type": "int",
+      "tooltip": "Sampling steps when the lightning LoRA is off.",
+      "bind": [["nuke_steps", "value"]]
+    },
+    {
+      "name": "lightning",
+      "label": "lightning LoRA",
+      "type": "bool",
+      "tooltip": "Use the turbo LoRA with its own, much lower, step count. Much faster, lower quality.",
+      "bind": [["nuke_enable_lightning_LoRA", "value"]]
+    },
+    {
+      "name": "lightning_steps",
+      "label": "lightning steps",
+      "type": "int",
+      "tooltip": "Sampling steps when the lightning LoRA is on. The LoRA is made for 4.",
+      "bind": [["nuke_lightning_steps", "value"]]
+    }
+  ]
+}

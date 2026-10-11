@@ -15,7 +15,11 @@ node.json keys (see README "Workflow definitions" for the full reference):
     set                            constants: [[title, input, value], ...]
     images                         {"max": N} for numbered nuke_input_N slots,
                                    or {"inputs": [{name, title}, ...]} for
-                                   named ones such as first / last frame
+                                   named ones such as first / last frame;
+                                   plus optional "min", "match_format"
+                                   and "resize"
+    videos                         {"max": N} for numbered nuke_video_N
+                                   Load Video slots; optional "min"
     size                           {"multiple", "megapixels", "megapixels_range"}
     timeout                        seconds to wait for a run (default 900)
     knobs                          the workflow-specific knob block
@@ -38,12 +42,14 @@ KNOB_TYPES = ("int", "float", "bool", "string", "choice")
 TITLE_PREFIX = "nuke_"
 SAVE_PREFIX = "nuke_save"
 INPUT_PREFIX = "nuke_input_"
+VIDEO_PREFIX = "nuke_video_"
+LOADERS = ("LoadImage", "LoadVideo")       # nodes whose file Nuke supplies
 
 # Knob names a workflow can't use: the standard knobs every node gets, and
 # the ones Nuke puts on every node.
 RESERVED = set("""
     prompt seed random_seed match_input target_format megapixels gen_size
-    reformat_output inputs_info output_dir out_name generate cancel reuse_seed status
+    reformat_output inputs_info video_range video_first video_last output_dir out_name generate cancel reuse_seed status
     last_file last_seed used_prompt comfy_workflow host input_mode
     png_colorspace temp_inputs instant_cleanup refresh_choices create_read timeout
     name label disable selected xpos ypos tile_color note_font
@@ -77,6 +83,37 @@ class Workflow(object):
         if self.image_inputs is not None:
             return len(self.image_inputs)
         return int(self.spec.get("images", {}).get("max", 0))
+
+    @property
+    def max_videos(self):
+        """Video inputs the node offers (numbered Load Video slots)."""
+        return int(self.spec.get("videos", {}).get("max", 0))
+
+    @property
+    def min_videos(self):
+        return int(self.spec.get("videos", {}).get("min", 0))
+
+    @property
+    def video_prefix(self):
+        return self.spec.get("videos", {}).get("prefix", VIDEO_PREFIX)
+
+    @property
+    def min_images(self):
+        """How many images a run needs. 0 = they are all optional."""
+        return int(self.spec.get("images", {}).get("min", 1))
+
+    @property
+    def match_format(self):
+        """Whether the node's format follows its first input by default.
+        Right for an edit, wrong when inputs are only references."""
+        return bool(self.spec.get("images", {}).get("match_format", True))
+
+    @property
+    def resize_inputs(self):
+        """Whether inputs are scaled to the generation budget before they
+        are sent. False sends them as they are, for references the model
+        sizes itself."""
+        return bool(self.spec.get("images", {}).get("resize", True))
 
     @property
     def multiple(self):
@@ -194,24 +231,25 @@ def lint_graph(graph):
         problems.append("More than one save node (%s); Nuke reads back one "
                         "image, so keep one." % ", ".join(saves))
 
-    slots = sorted(int(t[len(INPUT_PREFIX):]) for t in by_title
-                   if t.startswith(INPUT_PREFIX)
-                   and t[len(INPUT_PREFIX):].isdigit())
-    if slots and slots != list(range(1, len(slots) + 1)):
-        problems.append("Image inputs must be numbered %s1..N with no gaps; "
-                        "found %s." % (INPUT_PREFIX, slots))
+    for prefix, cls, what in ((INPUT_PREFIX, "LoadImage", "Image"),
+                              (VIDEO_PREFIX, "LoadVideo", "Video")):
+        slots = sorted(int(t[len(prefix):]) for t in by_title
+                       if t.startswith(prefix) and t[len(prefix):].isdigit())
+        if slots and slots != list(range(1, len(slots) + 1)):
+            problems.append("%s inputs must be numbered %s1..N with no gaps; "
+                            "found %s." % (what, prefix, slots))
+        for nid, node in graph.items():
+            if _title(node).startswith(prefix) and node["class_type"] != cls:
+                problems.append("'%s' must be a stock %s node, not %s."
+                                % (_title(node), cls, node["class_type"]))
     for nid, node in graph.items():
-        is_slot = _title(node).startswith(INPUT_PREFIX)
-        if node["class_type"] == "LoadImage" \
+        if node["class_type"] in LOADERS \
                 and not _title(node).startswith(TITLE_PREFIX):
-            problems.append("LoadImage node %s ('%s') has a file baked in. "
-                            "Give it a %s title so Nuke supplies the image "
-                            "(%sN, or a name like nuke_first_frame), or "
-                            "remove it." % (nid, _title(node), TITLE_PREFIX,
-                                            INPUT_PREFIX))
-        if is_slot and node["class_type"] != "LoadImage":
-            problems.append("'%s' must be a stock LoadImage node, not %s."
-                            % (_title(node), node["class_type"]))
+            problems.append("%s node %s ('%s') has a file baked in. Give it "
+                            "a %s title so Nuke supplies the file (%sN, %sN, "
+                            "or a name like nuke_first_frame), or remove it."
+                            % (node["class_type"], nid, _title(node),
+                               TITLE_PREFIX, INPUT_PREFIX, VIDEO_PREFIX))
     return problems
 
 
@@ -293,11 +331,18 @@ def validate(wf):
             problems.append("images.max is %d but the workflow only has %d "
                             "'%sN' slot(s)." % (wf.max_images, len(slots),
                                                 wf.image_prefix))
+    if wf.max_videos:
+        slots = comfy_client.image_slots(wf.graph, wf.video_prefix)
+        claimed.update(_title(wf.graph[nid]) for nid in slots)
+        if len(slots) < wf.max_videos:
+            problems.append("videos.max is %d but the workflow only has %d "
+                            "'%sN' slot(s)." % (wf.max_videos, len(slots),
+                                                wf.video_prefix))
     for nid, node in wf.graph.items():
-        if node["class_type"] == "LoadImage" and _title(node) not in claimed:
-            problems.append("LoadImage '%s' is not declared under \"images\" "
-                            "in node.json, so its file would be baked in."
-                            % _title(node))
+        if node["class_type"] in LOADERS and _title(node) not in claimed:
+            problems.append("%s '%s' is not declared under \"images\" or "
+                            "\"videos\" in node.json, so its file would be "
+                            "baked in." % (node["class_type"], _title(node)))
     return problems
 
 
@@ -339,11 +384,15 @@ def check_server(graph, info, output=None):
             if "." in key:             # sub-input of a dynamic combo
                 continue
             if key not in specs:
-                problems.append("%s '%s' has no input '%s' on this server."
-                                % (cls, title, key))
+                # An unknown literal is a display-only widget the editor
+                # exported (LoadVideo's video-preview); the server ignores
+                # it. An unknown link means the node has changed.
+                if _is_link(value):
+                    problems.append("%s '%s' has no input '%s' on this "
+                                    "server." % (cls, title, key))
                 continue
             options = combo_options(specs[key])
-            is_slot = cls == "LoadImage" and title.startswith(TITLE_PREFIX)
+            is_slot = cls in LOADERS and title.startswith(TITLE_PREFIX)
             if options is not None and not _is_link(value) and not is_slot \
                     and value not in options:
                 problems.append("%s '%s': %s = '%s' is not available on this "
@@ -404,14 +453,16 @@ def server_class(wf, knob):
 # Patching and running
 # --------------------------------------------------------------------------
 
-def build(wf, values, images=None, image_mode="upload", filename_prefix=None):
+def build(wf, values, images=None, image_mode="upload", filename_prefix=None,
+          videos=None):
     """A patched copy of the workflow graph, ready to submit.
 
     values holds the standard values (prompt, seed, width, height) and the
     workflow's own knobs by name; anything missing keeps the export's value.
     images are upload names or absolute paths: in slot order for numbered
     slots, or one per named input (None = not supplied) for named ones.
-    Unused image nodes are pruned along with their links."""
+    videos are upload names in slot order. Unused image and video nodes
+    are pruned along with their links."""
     graph = copy.deepcopy(wf.graph)
     for name, targets in wf.bind.items():
         if values.get(name) is None:
@@ -430,8 +481,10 @@ def build(wf, values, images=None, image_mode="upload", filename_prefix=None):
     comfy_client.set_input(graph, wf.output, "filename_prefix",
                            filename_prefix or "nuke/" + wf.name)
     if wf.max_images:
-        if not images or not any(images):
-            raise ComfyError("'%s' needs at least one input image" % wf.name)
+        images = images or []
+        if len([i for i in images if i]) < wf.min_images:
+            raise ComfyError("'%s' needs at least %d input image(s)"
+                             % (wf.name, wf.min_images))
         if wf.image_inputs is None:
             comfy_client.bind_images(graph, images, mode=image_mode,
                                      prefix=wf.image_prefix)
@@ -448,19 +501,35 @@ def build(wf, values, images=None, image_mode="upload", filename_prefix=None):
                     comfy_client.remove_node(graph, nid)
     elif images:
         raise ComfyError("'%s' takes no input images" % wf.name)
+
+    videos = videos or []
+    if len(videos) < wf.min_videos:
+        raise ComfyError("'%s' needs at least %d input video(s)"
+                         % (wf.name, wf.min_videos))
+    if len(videos) > wf.max_videos:
+        raise ComfyError("'%s' takes %d video(s), got %d"
+                         % (wf.name, wf.max_videos, len(videos)))
+    if wf.max_videos:
+        slots = comfy_client.image_slots(graph, wf.video_prefix)
+        for nid, value in zip(slots, videos):
+            graph[nid]["inputs"]["file"] = value
+        for nid in slots[len(videos):]:
+            comfy_client.remove_node(graph, nid)
     return graph
 
 
 def generate(name, values, out_path, images=None,
              host=comfy_client.DEFAULT_HOST, input_mode="auto",
-             upload_names=None, timeout=None, should_cancel=None, log=print):
+             upload_names=None, timeout=None, videos=None,
+             video_upload_names=None, should_cancel=None, log=print):
     """Run an installed workflow end to end. Returns the result dict that is
     also written to the sidecar: the values used, path, seed, timing.
 
     images are local file paths: in slot order, or one per named input with
     None for any not supplied. out_path's extension is a placeholder; the
     result's "path" has the real one (.png, .mp4 ...). timeout is in
-    seconds and defaults to the workflow's own. input_mode:
+    seconds and defaults to the workflow's own. videos are local movie
+    files in slot order; they are always uploaded. input_mode (images):
         "path"   - Comfy reads the files where they are (needs the
                    NukeLoadImagePath custom node and a shared disk)
         "upload" - copy them into Comfy's input dir via /upload/image
@@ -502,7 +571,16 @@ def generate(name, values, out_path, images=None,
         info.update(images=[os.path.abspath(p) if p else None for p in images],
                     image_mode=mode)
 
-    graph = build(wf, values, refs, image_mode=info.get("image_mode", "upload"))
+    video_refs = []
+    for i, path in enumerate(videos or []):
+        log("Uploading %s" % os.path.basename(path))
+        video_refs.append(client.upload_image(
+            path, name=video_upload_names[i] if video_upload_names else None))
+    if video_refs:
+        info.update(videos=[os.path.abspath(p) for p in videos])
+
+    graph = build(wf, values, refs, image_mode=info.get("image_mode", "upload"),
+                  videos=video_refs)
     log("Submitting %s" % wf.label)
     return comfy_client.run_workflow(client, graph, out_path, info, wf.output,
                                      should_cancel, log,
@@ -523,7 +601,7 @@ def scaffold(graph, info=None):
     only show what an artist would change. info (/object_info) gives types
     and tells combos from free text."""
     spec = {"label": "", "node_name": "", "output": "", "bind": {}, "knobs": []}
-    slots, named, used = 0, [], set()
+    slots, video_slots, named, used = 0, 0, [], set()
     for nid, node in graph.items():
         title = _title(node)
         if not title.startswith(TITLE_PREFIX):
@@ -533,6 +611,9 @@ def scaffold(graph, info=None):
             continue
         if title.startswith(INPUT_PREFIX):
             slots += 1
+            continue
+        if title.startswith(VIDEO_PREFIX):
+            video_slots += 1
             continue
         if node["class_type"] == "LoadImage":
             named.append({"name": title[len(TITLE_PREFIX):], "title": title})
@@ -567,6 +648,8 @@ def scaffold(graph, info=None):
         spec["images"] = {"max": slots}
     elif named:
         spec["images"] = {"inputs": named}
+    if video_slots:
+        spec["videos"] = {"max": video_slots}
     return spec
 
 

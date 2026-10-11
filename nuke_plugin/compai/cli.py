@@ -124,6 +124,7 @@ def cmd_run(args):
     images = [None if i == "-" else i for i in args.image]
     result = workflows.generate(args.name, values, args.out,
                                 images=images or None, host=args.host,
+                                videos=args.video or None,
                                 input_mode=args.input_mode)
     if result.get("used_prompt") and result["used_prompt"] != args.prompt:
         print("\nPrompt used:\n" + result["used_prompt"])
@@ -162,6 +163,8 @@ def main(argv=None):
     c.add_argument("--image", action="append", default=[],
                    help="input image (repeatable; '-' leaves a named "
                         "input such as 'first' empty)")
+    c.add_argument("--video", action="append", default=[],
+                   help="input video file (repeatable)")
     c.add_argument("--input-mode", default="auto",
                    choices=["auto", "path", "upload"])
     c.set_defaults(fn=cmd_run)

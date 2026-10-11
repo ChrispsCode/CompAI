@@ -75,6 +75,8 @@ def create(name):
             _add_input_chain(i, label=item["name"])
     elif wf.max_images:
         _add_input_chain(1)            # more appear as inputs get connected
+    if wf.max_videos:
+        _add_video_chain(1)
     _set_colorspace(_add_output_chain(), "")
     g.end()
     g["knobChanged"].setValue("import compai; compai.on_knob_changed()")
@@ -148,19 +150,97 @@ def _add_input_chain(i, colorspace="", label=None):
     _set_colorspace(w, colorspace)
 
 
-def _sync_inputs(node, max_images):
-    """Keep exactly one free input after the highest connected one, up to
-    the workflow's limit, the way Merge does. A gap lower down is left
-    alone: generating just skips it."""
-    connected = _connected_inputs(node)
-    want = min(max_images, connected[-1] + 2 if connected else 1)
+def _add_video_chain(n, colorspace=""):
+    """vidN -> vprepN (scale to fill, crop) -> vwriteN (ProRes .mov, run on
+    demand over a frame range)."""
+    inp = nuke.nodes.Input(name="vid%d" % n)
+    prep = nuke.nodes.Reformat(name="vprep%d" % n, inputs=[inp])
+    prep["type"].setValue("to box")
+    prep["box_fixed"].setValue(True)
+    prep["resize"].setValue("fill")
+    prep["filter"].setValue("Lanczos4")
+    prep["black_outside"].setValue(True)
+    w = nuke.nodes.Write(name="vwrite%d" % n, inputs=[prep])
+    w["file_type"].setValue("mov")
+    w["channels"].setValue("rgb")
+    knobs = w.knobs()
+    if "mov64_codec" in knobs:
+        w["mov64_codec"].setValue("appr")
+    if "mov_prores_codec_profile" in knobs:
+        w["mov_prores_codec_profile"].setValue("ProRes 4:2:2 10-bit")
+    if "create_directories" in knobs:
+        w["create_directories"].setValue(True)
+    w["disable"].setValue(True)        # only enabled while we execute it
+    _set_colorspace(w, colorspace)
+
+
+# The two kinds of pipe a node can have. Each kind grows on its own, so
+# they end up interleaved on the node (img1, vid1, img2 ...); the Input
+# node's name is what tells them apart, never its position.
+IMG, VID = "img", "vid"
+_CHAIN = {IMG: ("write%d", "prep%d", "img%d"),
+          VID: ("vwrite%d", "vprep%d", "vid%d")}
+
+
+def _pipes(node, kind):
+    """This node's inputs of one kind as [(n, index)], in slot order. n is
+    the 1-based slot (img2 -> 2); index is where the pipe sits among the
+    group's inputs. Named image inputs (first, last) count in the order
+    node.json lists them."""
+    wf = _workflow(node)
+    named = {}
+    if kind == IMG and wf is not None and wf.image_inputs is not None:
+        named = {item["name"]: i
+                 for i, item in enumerate(wf.image_inputs, start=1)}
+    found = []
     with node:
-        have = len(nuke.allNodes("Input"))
-        for i in range(have + 1, want + 1):
-            _add_input_chain(i, node["png_colorspace"].value().strip())
-        for i in range(have, want, -1):
-            for name in ("write%d", "prep%d", "img%d"):
-                nuke.delete(nuke.toNode(name % i))
+        for inp in nuke.allNodes("Input"):
+            m = re.match(r"^%s(\d+)$" % kind, inp.name())
+            n = int(m.group(1)) if m else named.get(inp.name())
+            if n:
+                found.append((n, int(inp["number"].value())))
+    return sorted(found)
+
+
+def _connected(node, kind):
+    return [(n, i) for n, i in _pipes(node, kind) if node.input(i) is not None]
+
+
+def _sync_inputs(node, kind, limit):
+    """Keep exactly one free input of this kind after the highest connected
+    one, up to the workflow's limit, the way Merge does. A gap lower down
+    is left alone: generating just skips it."""
+    connected = _connected(node, kind)
+    want = min(limit, connected[-1][0] + 1 if connected else 1)
+    have = len(_pipes(node, kind))
+    colorspace = node["png_colorspace"].value().strip()
+    with node:
+        for n in range(have + 1, want + 1):
+            (_add_input_chain if kind == IMG else _add_video_chain)(n, colorspace)
+        for n in range(have, want, -1):
+            for name in _CHAIN[kind]:
+                nuke.delete(nuke.toNode(name % n))
+    if have > want:
+        _compact_inputs(node)
+
+
+def _compact_inputs(node):
+    """Deleting an Input that isn't the last leaves a dead, unnamed pipe on
+    the node. Renumber the remaining Inputs 0..N-1 and reconnect each to
+    what it had."""
+    with node:
+        inputs = sorted(nuke.allNodes("Input"),
+                        key=lambda n: n["number"].value())
+    numbers = [int(n["number"].value()) for n in inputs]
+    if numbers == list(range(len(inputs))):
+        return
+    feeds = [node.input(i) for i in numbers]
+    for i in range(max(numbers), -1, -1):
+        node.setInput(i, None)
+    for i, inp in enumerate(inputs):
+        inp["number"].setValue(i)
+    for i, feed in enumerate(feeds):
+        node.setInput(i, feed)
 
 
 # --------------------------------------------------------------------------
@@ -189,7 +269,7 @@ def _size_knobs(wf):
     knobs = []
     if wf.max_images:
         match = nuke.Boolean_Knob("match_input", "match first input's format")
-        match.setValue(True)
+        match.setValue(wf.match_format)
         match.setFlag(nuke.STARTLINE)
         knobs.append(match)
     mp = nuke.Double_Knob("megapixels", "megapixels")
@@ -202,7 +282,9 @@ def _size_knobs(wf):
                   + (" Each input image is sent at this budget too, at its "
                      "own aspect: scaled to fill and cropped, never stretched, "
                      "and untouched if it is already the right size."
-                     if wf.max_images else ""))
+                     if wf.max_images and wf.resize_inputs else "")
+                  + (" Input images are sent at their own size."
+                     if wf.max_images and not wf.resize_inputs else ""))
     fmt = nuke.Format_Knob("target_format", "format")
     fmt.setTooltip("Sets the aspect ratio of the generation. The pixel size "
                    "comes from megapixels, unless 'reformat result' is on.")
@@ -212,8 +294,22 @@ def _size_knobs(wf):
                         "(scaled to fill, then cropped).")
     reformat.setFlag(nuke.STARTLINE)
     knobs += [fmt, mp, nuke.Text_Knob("gen_size", "generate at", ""), reformat]
-    if wf.max_images:
+    if wf.max_images or wf.max_videos:
         knobs.append(nuke.Text_Knob("inputs_info", "inputs", ""))
+    if wf.max_videos:
+        rng = nuke.Enumeration_Knob("video_range", "video frames",
+                                    ["input range", "project range", "custom"])
+        rng.setTooltip("Which frames of each video input are sent.\n"
+                       "input range: each input's own first to last frame.\n"
+                       "project range: the script's frame range.\n"
+                       "custom: the two numbers alongside.\n"
+                       "Videos are sent as ProRes, scaled to the megapixel "
+                       "budget at their own aspect.")
+        first = nuke.Int_Knob("video_first", "")
+        first.clearFlag(nuke.STARTLINE)
+        last = nuke.Int_Knob("video_last", "")
+        last.clearFlag(nuke.STARTLINE)
+        knobs += [rng, first, last]
     return knobs
 
 
@@ -268,7 +364,7 @@ def _settings_knobs(wf):
                        "Raise it for long, high-quality runs. Changing it "
                        "doesn't affect a job that is already running.")
     knobs = [nuke.Tab_Knob("settings", "Settings"), name, host, timeout]
-    if wf.max_images:
+    if wf.max_images or wf.max_videos:
         mode = nuke.Enumeration_Knob("input_mode", "image transfer",
                                      ["auto", "path", "upload"])
         mode.setTooltip("path: Comfy reads the PNGs where Nuke wrote them (needs "
@@ -383,12 +479,12 @@ def on_knob_changed():
         with node:
             for n in nuke.allNodes("Write") + nuke.allNodes("Read"):
                 _set_colorspace(n, knob.value().strip())
-    if name == "inputChange" and node.knob("match_input") is not None:
+    if name == "inputChange" and node.knob("inputs_info") is not None:
         wf = _workflow(node)           # None if gone: leave the inputs alone
-        if wf is not None and wf.image_inputs is None and wf.max_images:
-            _sync_inputs(node, wf.max_images)
+        if wf is not None:
+            _guarded(_sync_all_inputs, node, wf)
     if name in ("target_format", "megapixels", "match_input", "temp_inputs",
-                "reformat_output", "inputChange", "showPanel"):
+                "video_range", "reformat_output", "inputChange", "showPanel"):
         _refresh(node)
     if name == "showPanel":
         jobs.release_stale_lock(node)
@@ -459,14 +555,28 @@ def on_generate(node):
         if knob is not None:
             values[spec["name"]] = knob.value()
 
-    connected = _connected_inputs(node) if wf.max_images else []
-    if wf.max_images and not connected:
-        nuke.message("Connect at least one image input.")
-        return
-    if len(connected) > wf.max_images:
-        nuke.message("%d inputs connected but '%s' takes at most %d."
-                     % (len(connected), wf.label, wf.max_images))
-        return
+    images_in = _connected(node, IMG) if wf.max_images else []
+    videos_in = _connected(node, VID) if wf.max_videos else []
+    for got, need, what in ((images_in, wf.min_images if wf.max_images else 0,
+                             "image"),
+                            (videos_in, wf.min_videos, "video")):
+        if len(got) < need:
+            nuke.message("Connect at least %d %s input%s."
+                         % (need, what, "" if need == 1 else "s"))
+            return
+    ranges = []
+    for n, index in videos_in:
+        first, last = _video_range(node, index)
+        if last < first:
+            nuke.message("vid%d: the frame range %d-%d is empty."
+                         % (n, first, last))
+            return
+        if last - first + 1 > MAX_VIDEO_FRAMES and not nuke.ask(
+                "vid%d is %d frames (%d-%d). That is a lot to render and "
+                "send; video models usually take a few hundred at most.\n\n"
+                "Send it anyway?" % (n, last - first + 1, first, last)):
+            return
+        ranges.append((first, last))
 
     _refresh(node)
     if node["random_seed"].value():
@@ -482,11 +592,13 @@ def on_generate(node):
                                      values["seed"])
 
     cleanup = None
-    if connected:
-        # Write the reference PNGs (main thread, current frame). Numbered
-        # slots are packed (img1 + img3 -> slots 1, 2); named inputs keep
-        # their own place, with None for the ones not connected.
+    if images_in or videos_in:
+        # Write the inputs on the main thread: images at the current frame,
+        # videos over their range. Numbered slots are packed (img1 + img3 ->
+        # slots 1, 2); named inputs keep their own place, with None for the
+        # ones not connected.
         stem, frame = os.path.splitext(out_path)[0], nuke.frame()
+        fps = nuke.root()["fps"].value()
         if node.knob("temp_inputs") is not None and node["temp_inputs"].value():
             folder = tempfile.mkdtemp(prefix="compai_")
             stem = os.path.join(folder, os.path.basename(stem))
@@ -497,25 +609,38 @@ def on_generate(node):
         named = wf.image_inputs is not None
         images = [None] * wf.max_images if named else []
         uploads = list(images)         # stable per-node names in Comfy's input
+        videos, video_uploads = [], []
         try:
-            for slot, idx in enumerate(connected, start=1):
-                tag = wf.image_inputs[idx]["name"] if named else "in%d" % slot
+            for slot, (n, index) in enumerate(images_in, start=1):
+                tag = wf.image_inputs[n - 1]["name"] if named else "in%d" % slot
                 path = "%s_%s.png" % (stem, tag)
-                _write_input(node, idx, path, frame)
+                _write_input(node, n, index, path, frame)
                 upload = "%s_%s.png" % (node.name(), tag)
                 if named:
-                    images[idx], uploads[idx] = path, upload
+                    images[n - 1], uploads[n - 1] = path, upload
                 else:
                     images.append(path)
                     uploads.append(upload)
+            for slot, ((n, index), (first, last)) in enumerate(
+                    zip(videos_in, ranges), start=1):
+                path = "%s_vid%d.mov" % (stem, slot)
+                _write_video(node, n, index, path, first, last, fps)
+                videos.append(path)
+                video_uploads.append("%s_vid%d.mov" % (node.name(), slot))
         except Exception as e:
             if cleanup:
                 shutil.rmtree(cleanup, ignore_errors=True)
-            nuke.message("Failed writing input images:\n%s" % e)
+            nuke.message("Failed writing inputs:\n%s" % e)
             return
-        params.update(images=images, upload_names=uploads,
-                      input_mode=node["input_mode"].value())
-        summary = "%d ref(s), frame %d, %s" % (len(connected), frame, summary)
+        refs = []
+        if images_in:
+            params.update(images=images, upload_names=uploads,
+                          input_mode=node["input_mode"].value())
+            refs.append("%d image(s) at frame %d" % (len(images_in), frame))
+        if videos:
+            params.update(videos=videos, video_upload_names=video_uploads)
+            refs.append("%d video(s)" % len(videos))
+        summary = "%s, %s" % (", ".join(refs), summary)
     jobs.start(node, workflows.generate, params, "queued " + summary, cleanup)
 
 
@@ -575,23 +700,31 @@ def _next_output_path(node):
     return os.path.join(out_dir, "%s_v%03d.png" % (name, version))
 
 
-def _connected_inputs(node):
-    return [i for i in range(node.inputs()) if node.input(i) is not None]
+MAX_VIDEO_FRAMES = 400      # ask before rendering and sending more than this
 
 
-def _write_input(node, input_index, path, frame):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    f = node.input(input_index).format()
+def _input_size(node, index, resize=True):
+    """(w, h) an input should be sent at, and whether it is already exactly
+    that, in which case it must not be resampled."""
+    f = node.input(index).format()
     w, h = comfy_client.generation_size(f.width() * f.pixelAspect(), f.height(),
                                         node["megapixels"].value(),
                                         _multiple(node))
-    n = input_index + 1
     exact = (f.width(), f.height(), f.pixelAspect()) == (w, h, 1)
+    return w, h, exact or not resize
+
+
+def _write_input(node, n, index, path, frame):
+    """Write image input n (the pipe at index) to path as a PNG."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    wf = _workflow(node)
+    w, h, as_is = _input_size(node, index,       # references go as they are
+                              wf is None or wf.resize_inputs)
     with node:
         prep = nuke.toNode("prep%d" % n)
         prep["box_width"].setValue(w)
         prep["box_height"].setValue(h)
-        prep["disable"].setValue(exact)    # already the right size: no resample
+        prep["disable"].setValue(as_is)    # already the right size: no resample
         write = nuke.toNode("write%d" % n)
         write["file"].setValue(path.replace("\\", "/"))
         write["disable"].setValue(False)
@@ -601,37 +734,91 @@ def _write_input(node, input_index, path, frame):
             write["disable"].setValue(True)
 
 
+def _write_video(node, n, index, path, first, last, fps):
+    """Write video input n over first..last to path as a ProRes .mov. Always
+    scaled to the megapixel budget: every frame costs memory in Comfy."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    w, h, as_is = _input_size(node, index)
+    with node:
+        prep = nuke.toNode("vprep%d" % n)
+        prep["box_width"].setValue(w)
+        prep["box_height"].setValue(h)
+        prep["disable"].setValue(as_is)
+        write = nuke.toNode("vwrite%d" % n)
+        write["file"].setValue(path.replace("\\", "/"))
+        if "mov64_fps" in write.knobs():
+            write["mov64_fps"].setValue(fps)
+        write["disable"].setValue(False)
+        try:
+            nuke.execute(write, first, last)
+        finally:
+            write["disable"].setValue(True)
+
+
+def _video_range(node, index):
+    """(first, last) frames to send for the video input at index."""
+    mode = node["video_range"].value()
+    if mode == "custom":
+        return int(node["video_first"].value()), int(node["video_last"].value())
+    source = nuke.root() if mode == "project range" else node.input(index)
+    return int(source.firstFrame()), int(source.lastFrame())
+
+
+def _sync_all_inputs(node, wf):
+    if wf.image_inputs is None and wf.max_images:
+        _sync_inputs(node, IMG, wf.max_images)
+    if wf.max_videos:
+        _sync_inputs(node, VID, wf.max_videos)
+
+
+def _guarded(fn, *args):
+    """Run fn with knobChanged re-entry switched off: our own setValue and
+    setInput calls would otherwise call us back."""
+    global _IN_REFRESH
+    was, _IN_REFRESH = _IN_REFRESH, True
+    try:
+        fn(*args)
+    finally:
+        _IN_REFRESH = was
+
+
 def _refresh(node):
     """Bring the derived knobs (matched format, size readout, input list) up
-    to date. Guarded so our own setValue calls don't re-enter knobChanged."""
-    global _IN_REFRESH
-    _IN_REFRESH = True
-    try:
-        _do_refresh(node)
-    finally:
-        _IN_REFRESH = False
+    to date."""
+    _guarded(_do_refresh, node)
 
 
 def _do_refresh(node):
     if node.knob("instant_cleanup") is not None:
         node["instant_cleanup"].setEnabled(bool(node["temp_inputs"].value()))
+    if node.knob("video_range") is not None:
+        custom = node["video_range"].value() == "custom"
+        node["video_first"].setEnabled(custom)
+        node["video_last"].setEnabled(custom)
+    wf = _workflow(node)
+    images = _connected(node, IMG)
     if node.knob("match_input") is not None:
-        connected = _connected_inputs(node)
-        if node["match_input"].value() and connected:
-            _set_format(node["target_format"], node.input(connected[0]).format())
+        if node["match_input"].value() and images:
+            _set_format(node["target_format"],
+                        node.input(images[0][1]).format())
         node["target_format"].setEnabled(not node["match_input"].value())
-        wf = _workflow(node)
-        if connected and wf is not None and wf.image_inputs is not None:
-            node["inputs_info"].setValue(
-                ", ".join(wf.image_inputs[i]["name"] for i in connected
-                          if i < len(wf.image_inputs)))
-        elif connected:
-            node["inputs_info"].setValue(
-                ", ".join("img%d" % (i + 1) for i in connected)
-                + "  ->  slot(s) 1-%d" % len(connected))
+    if node.knob("inputs_info") is not None:
+        if wf is not None and wf.image_inputs is not None:
+            parts = [wf.image_inputs[n - 1]["name"] for n, _ in images]
         else:
-            node["inputs_info"].setValue(
-                "<font color=#e0a96c>none connected</font>")
+            parts = ["img%d" % n for n, _ in images]
+        if parts and (wf is None or wf.image_inputs is None):
+            parts = [", ".join(parts) + "  ->  slot(s) 1-%d" % len(parts)]
+        videos = _connected(node, VID)
+        if videos:
+            parts.append(", ".join("vid%d" % n for n, _ in videos)
+                         + "  ->  video slot(s) 1-%d" % len(videos))
+        needed = wf is None or (wf.max_images and wf.min_images) \
+            or wf.min_videos
+        node["inputs_info"].setValue(
+            ";  ".join(parts) if parts
+            else "<font color=#e0a96c>none connected</font>" if needed
+            else "none (optional)")
     w, h = _generation_size(node)
     f = node["target_format"].value()
     text = "%d x %d" % (w, h)

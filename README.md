@@ -5,7 +5,7 @@ Run AI image generation from Nuke nodes. You set the prompt, seed, format and in
 - **Local models** run through ComfyUI. This is what exists today.
 - **Closed models** (Nano Banana and the like) will run through Foundry Griptape. Not started.
 
-> **Status: early.** Four workflows are installed: Qwen Image, Qwen Image Edit, Z-Image Turbo, and MiniMax H3 first/last frame to video (never yet generated).
+> **Status: early.** Five workflows are installed: Qwen Image, Qwen Image Edit, Z-Image Turbo, MiniMax H3 first/last frame to video, and MiniMax H3 reference to video (never yet generated).
 
 ---
 
@@ -44,9 +44,14 @@ Every node works the same way; only the block of model settings under the prompt
 
 **Nodes that take images:** the node starts with one input and grows a new free one each time you connect the last, like Merge, up to what the workflow accepts. Unconnected inputs are skipped and the rest are numbered in order, so you can write *"put the jacket from image 2 on the person in image 1"*. By default the format follows the first input. Each input is grabbed at the **current frame**, scaled to fill the generation size and cropped; it is never stretched. An input that is already the right size is sent untouched, so a Qwen Image result fed into Qwen Image Edit at the same megapixels comes back at exactly the same resolution with no resizing anywhere.
 
+| **Minimax_H3_ref2va** | 0–9 reference images, 0–3 reference videos | *duration (s)*, *fps*, *reference size*, *steps*, *lightning LoRA*, *lightning steps*. Makes a video |
+
 **Video nodes** work the same way, with these differences:
 
-- The inputs are named (*first*, *last*) and fixed. Connect either or both; at least one.
+- On **Minimax_H3_fl2va** the inputs are named (*first*, *last*) and fixed. Connect either or both; at least one.
+- On **Minimax_H3_ref2va** the inputs are references, all optional, and they don't set the node's format. There are two kinds, each growing on its own as you connect them, so they end up interleaved on the node; go by the label on the pipe:
+  - **img1, img2 …** (up to nine): reference images, grabbed at the current frame and sent at their own resolution.
+  - **vid1, vid2 …** (up to three): reference videos. Each is rendered out of Nuke as a ProRes movie, scaled to the megapixel budget, and uploaded. **video frames** chooses the range: each input's own range (default), the project range, or two numbers you type. Generate asks before sending more than 400 frames. Rendering the movie blocks Nuke until it's written.
 - The result is a movie file (`.mov` ProRes 422 by default), loaded into the node so that it **starts at the script's first frame** as it was when the result came back. Before and after the clip it holds.
 - **fps** follows the project's frame rate through an expression. The frame count is duration × fps, rounded up to the model's grid (5, 22, 39, 56 … frames), so 2 s gives 56 frames.
 - The movie has an audio track, which Nuke's Read ignores. Open the file elsewhere to hear it.
@@ -61,7 +66,7 @@ Each run writes versioned files to the output dir:
 |---|---|
 | `name_v003.png` | the result (`.mp4` / `.mov` from a video node) |
 | `name_v003.json` | provenance: every setting used, timing, and the exact workflow that ran |
-| `name_v003_in1.png` … | (image nodes only) the sRGB inputs that were sent to Comfy; `_first.png` / `_last.png` on nodes with named inputs. Tick **temporary input images** on the *Settings* tab to write these to the system temp folder instead: they stay for the session, so a run can still be checked in ComfyUI, and the system clears them later. Add **instant cleanup** to delete them the moment the run ends |
+| `name_v003_in1.png` … | (nodes with inputs) the sRGB inputs that were sent to Comfy; `_first.png` / `_last.png` on nodes with named inputs, `_vid1.mov` … for video inputs. Tick **temporary input images** on the *Settings* tab to write these to the system temp folder instead: they stay for the session, so a run can still be checked in ComfyUI, and the system clears them later. Add **instant cleanup** to delete them the moment the run ends |
 
 To recreate a result, use the seed on the *Results* tab and press **Reuse last seed**, or untick **new seed each run**.
 
@@ -150,6 +155,7 @@ tests/                       offline tests, see §9
 |---|---|---|---|---|
 | `qwen_t2i` | Qwen Image | – | enhance, steps | Qwen Image 2.1 + Qwen3-VL encoder + Qwen 3.5 prompt enhancer |
 | `qwen_edit` | Qwen Image Edit | 1–10 | enhance, steps | same, i2i enhancer |
+| `minimax_h3_ref2va` | Minimax_H3_ref2va | 0–9 reference images (`min` 0, sent unresized, don't drive the format) and 0–3 reference videos | duration, fps (→ `root.fps`), ref_size, steps, lightning, lightning_steps | MiniMax H3 ref2va + the same VAEs and encoder + 4-step turbo LoRA. Output is ComfyUI's stock Save Video (`.mp4`, H.264). `workflow.json` has three groups of edits vs Harry's export, listed in its `node.json` notes |
 | `z_image_turbo_t2i` | Z-Image Turbo | – | model (server list, `z_image`), steps | Z-Image Turbo, `qwen_3_4b` encoder, `ae` VAE |
 | `minimax_h3_fl2va` | Minimax_H3_fl2va | first, last (named, each optional) | duration, fps (→ `root.fps`), steps, lightning, lightning_steps, codec | MiniMax H3 fl2va + video and audio VAEs + Qwen3-VL 32B encoder + turbo LoRA. Output is ProRes/H.264 with audio. `workflow.json` has four edits vs Harry's export, listed in its `node.json` notes |
 
@@ -191,7 +197,9 @@ tests/                       offline tests, see §9
 | `timeout` | Seconds to wait for a run before giving up. Default 900; the video workflow uses 3600. It becomes the default of the node's *timeout (min)* knob, which is what a run actually uses |
 | `size` | Optional. `multiple` (width and height snap to it, default 16), `megapixels` (default budget, default 1.0), `megapixels_range` (slider, default `[0.25, 2.5]`). The video model needs a 32 grid and a 0.4 MP default |
 | `notes` | Free text, ignored by the code. Records any edits made to `workflow.json` after export |
-| `images` | **Either** `{"inputs": [{"name": "first", "title": "nuke_first_frame"}, …]}` for fixed, named inputs, each with its own Load Image node and each optional (an unused one is pruned with its links); **or** `{"max": N}`, which lets the node take up to N images (at most the number of `nuke_input_N` slots in the export; `scaffold` sets it to that). Connected inputs fill `nuke_input_1…` in order and unused slots are pruned. Optional `"prefix"` |
+| `images` | **Either** `{"inputs": [{"name": "first", "title": "nuke_first_frame"}, …]}` for fixed, named inputs, each with its own Load Image node and each optional (an unused one is pruned with its links); **or** `{"max": N}`, which lets the node take up to N images, growing as they're connected (at most the number of `nuke_input_N` slots in the export; `scaffold` sets it to that). Connected inputs fill `nuke_input_1…` in order and unused slots are pruned. Optional `"prefix"` |
+| `images` extras | `"min"`: images a run needs (default 1; 0 makes them all optional). `"match_format"`: whether *match first input's format* starts ticked (default true; false when inputs are references, not the frame). `"resize"`: false sends inputs at their own size instead of the megapixel budget (for references the model node sizes itself) |
+| `videos` | `{"max": N}` gives the node up to N video inputs, fed into stock **Load Video** nodes titled `nuke_video_1…N` in order, unused ones pruned. Optional `"min"` (default 0) and `"prefix"` |
 | `knobs` | The workflow's own block, in display order |
 
 Knob fields:
@@ -213,12 +221,13 @@ Knob fields:
 1. **Nodes are found by `_meta.title`, never by ID.** IDs change on re-export and grouped nodes get flattened to IDs like `459_458`. Titles Nuke uses start with `nuke_` and must be unique.
 2. **Exactly one save node, titled `nuke_save…`**, wired to the final image. Comfy only executes nodes that feed an output node.
 3. **Image inputs are stock `LoadImage` nodes with a `nuke_` title**: either `nuke_input_1 … nuke_input_N`, contiguous, or names such as `nuke_first_frame`. Pruning an unused one is only legal if the input it feeds is optional on the consuming node (auto-grow inputs, or `first_frame` / `last_frame`). `validate` requires every `LoadImage` to be declared under `images`, since an undeclared one would have its file baked in.
+   Video inputs are stock `LoadVideo` nodes titled `nuke_video_1 … N`, under the same rules. Pruning one also removes any node it leaves with no inputs at all (`remove_node` cascades), which is what takes the **Get Video Components** after it away; `nuke_` nodes are never removed that way.
 4. **An unconnected optional input is absent from an API export.** If Nuke should be able to feed it, it must be wired to a Load Image in ComfyUI before exporting.
 5. In API format **every widget is an input**: any key under `inputs` can be overwritten with a literal, which also replaces a link. The video workflow relies on this: `width`/`height` on the model node arrive linked from a Resolution Selector, and binding them replaces the links, leaving that node orphaned and unexecuted.
 
 Not enforced by the linter, so check by eye when ingesting: **one source for the prompt** (a String primitive titled `nuke_prompt` wired to every consumer, never the literal prompt typed into two nodes). A `PreviewAny` on the prompt path lets the client read back the prompt that was actually used (shown as *used prompt*).
 
-`check_server` adds what only the running ComfyUI knows: missing node classes, unknown inputs, combo values the server doesn't have (which is how a missing model file shows up), and whether the save node is really an output node.
+`check_server` adds what only the running ComfyUI knows: missing node classes, unknown *linked* inputs (an unknown literal is a display-only widget the editor exported, such as Load Video's `video-preview`, and is ignored), combo values the server doesn't have (which is how a missing model file shows up), and whether the save node is really an output node.
 
 Known quirk: in `qwen_edit`, **Batch Images (feeding the prompt enhancer) is only wired to inputs 1–2**. The enhancer sees two refs while the image model sees all of them. Fix in Comfy and re-export if it matters.
 
@@ -256,8 +265,12 @@ A new workflow should need **no Python**. If one does, the standard node lacks a
 - If the node is deleted mid-job, `nuke.toNode(key)` returns None and the result is dropped quietly.
 - `jobs.start` disables the Generate button, and Nuke saves that state with the script. `release_stale_lock` re-enables it on `showPanel` when no job is running.
 
-**Image inputs**: each is `imgN → prepN (Reformat to box, distort) → writeN (png, 8 bit, rgb, disabled except while executing)`.
-- **Growing inputs:** `_sync_inputs` runs on the `inputChange` knobChanged event and keeps exactly one free input after the highest connected one, up to `images.max`, by adding or deleting `imgN/prepN/writeN` chains inside the group. Disconnecting a middle input changes nothing; disconnecting the top one shrinks back to just above the next connected input. `inputChange` fires in terminal mode too, and it does not fire destructively on script load (checked: a saved node reopens with its inputs and connections intact).
+**Two kinds of pipe** (`node.IMG`, `node.VID`). A node can have image inputs, video inputs, or both, and each kind grows on its own, so their positions interleave (img1, vid1, img2 …). **Never assume an input's index from its slot number**: `_pipes(node, kind)` maps each slot `n` to its real index by reading the internal Input nodes' names and `number` knobs, and everything else goes through it.
+
+**Video inputs**: each is `vidN → vprepN (to box, fill) → vwriteN (mov, ProRes 4:2:2 10-bit, disabled except while executing)`. `_write_video` renders the chosen range on the main thread (`video_range`: the input's own `firstFrame()/lastFrame()`, the root's, or `video_first/last`), at the project fps, always scaled to the megapixel budget because every frame costs memory in Comfy. Videos are always uploaded (`/upload/image` takes any file); there is no path mode for them. More than `MAX_VIDEO_FRAMES` (400) asks first.
+
+**Image inputs**: each is `imgN → prepN (Reformat to box, fill) → writeN (png, 8 bit, rgb, disabled except while executing)`.
+- **Growing inputs:** `_sync_inputs` runs on the `inputChange` knobChanged event, once per kind, and keeps exactly one free input of that kind after the highest connected one, up to the workflow's limit, by adding or deleting chains inside the group. Deleting an Input that isn't the last one leaves a hole in the group's input numbers (a dead pipe), so `_compact_inputs` renumbers the rest 0..N-1 and reconnects each to what it had. Disconnecting a middle input changes nothing; disconnecting the top one shrinks back to just above the next connected input. `inputChange` fires in terminal mode too, and it does not fire destructively on script load (checked: a saved node reopens with its inputs and connections intact).
 - **Temporary inputs:** with `temp_inputs` on, the PNGs go to a fresh `tempfile.mkdtemp(prefix="compai_")` folder. On Harry's machine that is under `/tmp`, a RAM-backed tmpfs emptied on reboot and swept of files older than 10 days, so nothing is permanent. With `instant_cleanup` also on, `jobs._worker` deletes the folder when the run ends (done, failed or cancelled), before the result is reported. The sidecar records the paths either way. A node that has `temp_inputs` but no `instant_cleanup` knob (made on 2026-10-11 before the second knob existed) cleans up instantly, as it did then.
 - **Packing:** connected inputs are packed into slots 1..k.
 - **Ref sizing:** each ref is sized to the megapixel budget at its *own* aspect.
@@ -276,6 +289,8 @@ A new workflow should need **no Python**. If one does, the standard node lacks a
 - `node.setName(name)` has **no** `uncollisionable` argument. Setting a taken name gets uniquified automatically.
 - Format knobs **can** be expression-linked: `reformat["format"].setExpression("parent.target_format")`. (`hasExpression()` reports False for it, but it works.)
 - `Format_Knob.setValue()` only accepts the **name** of a registered format. Passing a `Format` object does nothing except log "not in named format list", and raises no exception. For an unnamed format, register it with `nuke.addFormat("w h pa name")` first (adding the same one twice is harmless). See `node._set_format`.
+- Deleting an Input node from a group does **not** renumber the others: `maxInputs()` still counts the hole. A new Input takes the lowest free number. External connections belong to the number, not the Input node, so renumbering means reconnecting.
+- A Write set to `file_type` mov defaults to ProRes 4:2:2 HQ at 24 fps regardless of the project; set `mov_prores_codec_profile` and `mov64_fps` explicitly.
 - **Inside `with node:` (a group context) `nuke.root()` is the group, not the script.** Read script settings such as `first_frame` before entering the block. The test stub now raises if you get this wrong.
 - A Read's `frame` knob (for "start at") must hold a literal number: a TCL expression like `[value root.first_frame]` is stored but not evaluated. An expression on `TimeOffset.time_offset` also evaluated to 0 in terminal mode, so that route was dropped.
 - A Read's `colorspace` knob falls back to the file type's default when the file changes type (PNG → MP4). Save it and set it again after `fromUserText`.
@@ -294,6 +309,8 @@ A new workflow should need **no Python**. If one does, the standard node lacks a
 | All three nodes, end to end in the Nuke GUI | ✅ tested by Harry on 2026-10-10 on the definition-driven code, **before** the raw-output / crop-inputs change |
 | Raw output, reformat toggle, fill-and-crop inputs, exact pass-through | ✅ headless Nuke 15.2, and Harry in the GUI on 2026-10-10 |
 | MiniMax H3 video node | ✅ definition passes every check against live Comfy. ✅ headless Nuke 15.2 with synthetic clips: named inputs, last-only connect, 864x480 on the 32 grid, fps following the project, clip starting on the script's first frame (verified frame by frame at 1001), sRGB, versioning, Create Read, timeout knob. ⚠️ **never generated**: the added last-frame and fps nodes, the rewritten length expression, the shape of Comfy's history entry for `SaveVideoHQ`, run time and VRAM on the 4070 are all unverified |
+| MiniMax H3 reference-to-video node, images | ✅ Harry generated with two references and with none on 2026-10-11 |
+| Video inputs (vid1–3) | ✅ definition passes against live Comfy. ✅ headless Nuke 15.2: both kinds of pipe growing and shrinking, renumbering with connections kept, save and reopen, a 24-frame ProRes written from a clip at the budget size and project fps, the three range modes. ⚠️ **never generated**: uploading a `.mov` through `/upload/image`, whether Load Video accepts a file in the `nuke/` subfolder, and Comfy reading Nuke's ProRes are unverified. ⚠️ Adding and removing pipes while dragging in the GUI is untested for the two-kind case |
 | Growing inputs (1 → 10) on Qwen Image Edit | ✅ headless Nuke 15.2: grow, middle gap, shrink, stop at 10, save and reopen, write from an added input. ⚠️ not yet tried in the GUI (adding/deleting Input nodes from a callback while dragging a pipe), and no generation with more than 4 images has been run |
 | All three workflows vs live Comfy `/object_info` | ✅ node classes, input names and model files all present (ComfyUI 0.38.1) |
 | All three nodes in real Nuke 15.2, headless, no generation | ✅ creation, knobs and defaults, model dropdown filled from live Comfy, refresh, format link, "match input", writing an input PNG, loading a result, save and reopen |
@@ -335,4 +352,5 @@ Useful Comfy endpoints: `/prompt`, `/history/<id>`, `/view`, `/upload/image`, `/
   - *Audio* is in the file but Nuke has no audio stream to pass it down. `AudioRead` only takes WAV/AIFF, so using it would mean extracting the track with ffmpeg first. Not done.
   - *Inputs are single frames* grabbed at the current frame. A video-to-video workflow would need frame ranges written out and uploaded, which nothing supports yet.
   - *Image sequences* (EXR/PNG) would suit Nuke better than a movie, but mean many files per result; `run_workflow` downloads only the first file.
-  - *Model variants.* The export is the first/last-frame model. `minimax_h3_ref2va_*` is also installed in ComfyUI and would be a separate workflow.
+  - *Reference audio.* The ref2va model node also takes reference audio clips and each reference video's soundtrack. Nuke has no audio stream, so these aren't exposed; video inputs are sent silent.
+  - *Video input length.* The model wants reference videos of about 2 to 15 s at 24 fps. Nothing enforces that beyond the 400-frame prompt.
