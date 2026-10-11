@@ -10,7 +10,7 @@
     "height": [["nuke_latent", "height"]]
   },
   "set": [["nuke_size_switch", "switch", true]],
-  "images": {"max": 4},
+  "images": {"max": 10},
   "knobs": [
     {
       "name": "enhance",

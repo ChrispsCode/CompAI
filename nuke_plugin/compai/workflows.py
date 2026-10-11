@@ -13,7 +13,11 @@ node.json keys (see README "Workflow definitions" for the full reference):
     bind                           standard values -> [[title, input], ...]
                                    (prompt, seed, width, height)
     set                            constants: [[title, input, value], ...]
-    images                         {"max": N, "prefix": "nuke_input_"}
+    images                         {"max": N} for numbered nuke_input_N slots,
+                                   or {"inputs": [{name, title}, ...]} for
+                                   named ones such as first / last frame
+    size                           {"multiple", "megapixels", "megapixels_range"}
+    timeout                        seconds to wait for a run (default 900)
     knobs                          the workflow-specific knob block
 """
 
@@ -41,7 +45,7 @@ RESERVED = set("""
     prompt seed random_seed match_input target_format megapixels gen_size
     reformat_output inputs_info output_dir out_name generate cancel reuse_seed status
     last_file last_seed used_prompt comfy_workflow host input_mode
-    png_colorspace refresh_choices
+    png_colorspace temp_inputs instant_cleanup refresh_choices create_read timeout
     name label disable selected xpos ypos tile_color note_font
     note_font_size note_font_color hide_input cached postage_stamp
     lifetimeStart lifetimeEnd useLifetime knobChanged onCreate onDestroy
@@ -63,8 +67,33 @@ class Workflow(object):
     constants = property(lambda self: self.spec.get("set", []))
 
     @property
+    def image_inputs(self):
+        """Named image inputs ([{name, title}, ...]), each with its own
+        LoadImage node, or None if the workflow uses numbered slots."""
+        return self.spec.get("images", {}).get("inputs")
+
+    @property
     def max_images(self):
+        if self.image_inputs is not None:
+            return len(self.image_inputs)
         return int(self.spec.get("images", {}).get("max", 0))
+
+    @property
+    def multiple(self):
+        """Width and height are snapped to a multiple of this."""
+        return int(self.spec.get("size", {}).get("multiple", 16))
+
+    @property
+    def megapixels(self):
+        return float(self.spec.get("size", {}).get("megapixels", 1.0))
+
+    @property
+    def megapixels_range(self):
+        return self.spec.get("size", {}).get("megapixels_range", [0.25, 2.5])
+
+    @property
+    def timeout(self):
+        return int(self.spec.get("timeout", 900))
 
     @property
     def image_prefix(self):
@@ -82,6 +111,23 @@ def names(root=None):
         return []
     return sorted(d for d in os.listdir(root)
                   if os.path.isfile(os.path.join(root, d, "node.json")))
+
+
+_CACHE = {}
+
+
+def load_cached(name):
+    """load(), but only re-reading the files when they change. For callers
+    that run on every knob change."""
+    folder = os.path.join(WORKFLOWS_DIR, name)
+    try:
+        stamp = tuple(os.path.getmtime(os.path.join(folder, f))
+                      for f in ("node.json", "workflow.json"))
+    except OSError as e:
+        raise ComfyError("Can't load workflow '%s': %s" % (name, e))
+    if _CACHE.get(name, (None,))[0] != stamp:
+        _CACHE[name] = (stamp, load(name))
+    return _CACHE[name][1]
 
 
 def load(name, root=None):
@@ -156,10 +202,13 @@ def lint_graph(graph):
                         "found %s." % (INPUT_PREFIX, slots))
     for nid, node in graph.items():
         is_slot = _title(node).startswith(INPUT_PREFIX)
-        if node["class_type"] == "LoadImage" and not is_slot:
+        if node["class_type"] == "LoadImage" \
+                and not _title(node).startswith(TITLE_PREFIX):
             problems.append("LoadImage node %s ('%s') has a file baked in. "
-                            "Title it %sN so Nuke supplies the image, or "
-                            "remove it." % (nid, _title(node), INPUT_PREFIX))
+                            "Give it a %s title so Nuke supplies the image "
+                            "(%sN, or a name like nuke_first_frame), or "
+                            "remove it." % (nid, _title(node), TITLE_PREFIX,
+                                            INPUT_PREFIX))
         if is_slot and node["class_type"] != "LoadImage":
             problems.append("'%s' must be a stock LoadImage node, not %s."
                             % (_title(node), node["class_type"]))
@@ -182,6 +231,9 @@ def validate(wf):
                             % (what, title, key,
                                ", ".join(sorted(wf.graph[nid]["inputs"]))))
 
+    if "/" in wf.label:
+        problems.append("label: '/' would split the menu entry into a "
+                        "submenu; use another character.")
     if not spec.get("output"):
         problems.append("node.json needs \"output\": the save node's title.")
     else:
@@ -223,12 +275,29 @@ def validate(wf):
                 problems.append("%s: a choice needs \"options\": a list, or "
                                 "\"server\" to ask ComfyUI." % what)
 
-    if wf.max_images:
-        slots = len(comfy_client.image_slots(wf.graph, wf.image_prefix))
-        if slots < wf.max_images:
+    claimed = set()
+    if wf.image_inputs is not None:
+        names = [i.get("name", "") for i in wf.image_inputs]
+        if len(set(names)) != len(names) or not all(
+                re.match(r"^[A-Za-z][A-Za-z0-9_]*$", n) for n in names):
+            problems.append("images.inputs: each needs a unique \"name\" "
+                            "(letters, digits, underscores).")
+        for item in wf.image_inputs:
+            check_target("image input '%s'" % item.get("name"),
+                         item.get("title", ""), "image")
+            claimed.add(item.get("title"))
+    elif wf.max_images:
+        slots = comfy_client.image_slots(wf.graph, wf.image_prefix)
+        claimed.update(_title(wf.graph[nid]) for nid in slots)
+        if len(slots) < wf.max_images:
             problems.append("images.max is %d but the workflow only has %d "
-                            "'%sN' slot(s)." % (wf.max_images, slots,
+                            "'%sN' slot(s)." % (wf.max_images, len(slots),
                                                 wf.image_prefix))
+    for nid, node in wf.graph.items():
+        if node["class_type"] == "LoadImage" and _title(node) not in claimed:
+            problems.append("LoadImage '%s' is not declared under \"images\" "
+                            "in node.json, so its file would be baked in."
+                            % _title(node))
     return problems
 
 
@@ -244,13 +313,14 @@ def combo_options(input_spec):
     input isn't a plain combo. Handles both the old and the new spec shape."""
     if not isinstance(input_spec, list) or not input_spec:
         return None
+    options = None
     if isinstance(input_spec[0], list):
-        return [o for o in input_spec[0] if isinstance(o, str)]
-    if input_spec[0] == "COMBO" and len(input_spec) > 1:
+        options = input_spec[0]
+    elif input_spec[0] == "COMBO" and len(input_spec) > 1:
         options = input_spec[1].get("options")
-        if isinstance(options, list):
-            return [o for o in options if isinstance(o, str)]
-    return None
+    if not isinstance(options, list):
+        return None
+    return [o for o in options if isinstance(o, (str, int, float))]
 
 
 def check_server(graph, info, output=None):
@@ -273,7 +343,7 @@ def check_server(graph, info, output=None):
                                 % (cls, title, key))
                 continue
             options = combo_options(specs[key])
-            is_slot = cls == "LoadImage" and title.startswith(INPUT_PREFIX)
+            is_slot = cls == "LoadImage" and title.startswith(TITLE_PREFIX)
             if options is not None and not _is_link(value) and not is_slot \
                     and value not in options:
                 problems.append("%s '%s': %s = '%s' is not available on this "
@@ -319,8 +389,8 @@ def choice_options(wf, knob, info=None):
         found = combo_options(_input_specs((info or {}).get(cls, {})).get(key))
         pattern = knob.get("match")
         options = [o for o in found or []
-                   if not pattern or re.search(pattern, o)]
-    options = list(options)
+                   if not pattern or re.search(pattern, str(o))]
+    options = [str(o) for o in options]
     return options if default in options else [default] + options
 
 
@@ -339,7 +409,9 @@ def build(wf, values, images=None, image_mode="upload", filename_prefix=None):
 
     values holds the standard values (prompt, seed, width, height) and the
     workflow's own knobs by name; anything missing keeps the export's value.
-    images are upload names or absolute paths, in slot order."""
+    images are upload names or absolute paths: in slot order for numbered
+    slots, or one per named input (None = not supplied) for named ones.
+    Unused image nodes are pruned along with their links."""
     graph = copy.deepcopy(wf.graph)
     for name, targets in wf.bind.items():
         if values.get(name) is None:
@@ -358,10 +430,22 @@ def build(wf, values, images=None, image_mode="upload", filename_prefix=None):
     comfy_client.set_input(graph, wf.output, "filename_prefix",
                            filename_prefix or "nuke/" + wf.name)
     if wf.max_images:
-        if not images:
+        if not images or not any(images):
             raise ComfyError("'%s' needs at least one input image" % wf.name)
-        comfy_client.bind_images(graph, images, mode=image_mode,
-                                 prefix=wf.image_prefix)
+        if wf.image_inputs is None:
+            comfy_client.bind_images(graph, images, mode=image_mode,
+                                     prefix=wf.image_prefix)
+        else:
+            if len(images) > len(wf.image_inputs):
+                raise ComfyError("'%s' takes %d image(s), got %d" % (
+                    wf.name, len(wf.image_inputs), len(images)))
+            images = list(images) + [None] * len(wf.image_inputs)
+            for item, value in zip(wf.image_inputs, images):
+                nid = comfy_client.find_node(graph, item["title"])
+                if value:
+                    comfy_client.set_image(graph, nid, value, image_mode)
+                else:
+                    comfy_client.remove_node(graph, nid)
     elif images:
         raise ComfyError("'%s' takes no input images" % wf.name)
     return graph
@@ -369,11 +453,14 @@ def build(wf, values, images=None, image_mode="upload", filename_prefix=None):
 
 def generate(name, values, out_path, images=None,
              host=comfy_client.DEFAULT_HOST, input_mode="auto",
-             upload_names=None, should_cancel=None, log=print):
+             upload_names=None, timeout=None, should_cancel=None, log=print):
     """Run an installed workflow end to end. Returns the result dict that is
     also written to the sidecar: the values used, path, seed, timing.
 
-    images are local file paths in slot order. input_mode:
+    images are local file paths: in slot order, or one per named input with
+    None for any not supplied. out_path's extension is a placeholder; the
+    result's "path" has the real one (.png, .mp4 ...). timeout is in
+    seconds and defaults to the workflow's own. input_mode:
         "path"   - Comfy reads the files where they are (needs the
                    NukeLoadImagePath custom node and a shared disk)
         "upload" - copy them into Comfy's input dir via /upload/image
@@ -393,7 +480,7 @@ def generate(name, values, out_path, images=None,
     info = dict(values, workflow=name)
 
     refs = None
-    if images:
+    if images and any(images):
         mode = input_mode
         has_loader = client.has_node(comfy_client.PATH_LOADER)
         if mode == "auto":
@@ -402,21 +489,24 @@ def generate(name, values, out_path, images=None,
             raise ComfyError("input_mode 'path' needs the %s custom node in "
                              "ComfyUI/custom_nodes (restart Comfy after "
                              "installing)" % comfy_client.PATH_LOADER)
-        if mode == "path":
-            refs = [os.path.abspath(p) for p in images]
-        else:
-            refs = []
-            for i, path in enumerate(images):
+        refs = []
+        for i, path in enumerate(images):
+            if not path:
+                refs.append(None)
+            elif mode == "path":
+                refs.append(os.path.abspath(path))
+            else:
                 log("Uploading %s" % os.path.basename(path))
                 refs.append(client.upload_image(
                     path, name=upload_names[i] if upload_names else None))
-        info.update(images=[os.path.abspath(p) for p in images],
+        info.update(images=[os.path.abspath(p) if p else None for p in images],
                     image_mode=mode)
 
     graph = build(wf, values, refs, image_mode=info.get("image_mode", "upload"))
     log("Submitting %s" % wf.label)
     return comfy_client.run_workflow(client, graph, out_path, info, wf.output,
-                                     should_cancel, log)
+                                     should_cancel, log,
+                                     timeout=timeout or wf.timeout)
 
 
 # --------------------------------------------------------------------------
@@ -426,13 +516,14 @@ def generate(name, values, out_path, images=None,
 def scaffold(graph, info=None):
     """A first-draft node.json for an export, from its nuke_* titles.
 
-    Standard values are bound by convention (nuke_prompt, any 'seed' input,
-    nuke_latent, nuke_save*, nuke_input_N). Every other literal input on a
+    Standard values are bound by convention (nuke_prompt, any '...seed'
+    input, a nuke_* node with width and height, nuke_save*, and LoadImage
+    nodes: numbered nuke_input_N, or named ones by their title). Every other literal input on a
     nuke_* node becomes a candidate knob: prune these by hand, a node should
     only show what an artist would change. info (/object_info) gives types
     and tells combos from free text."""
     spec = {"label": "", "node_name": "", "output": "", "bind": {}, "knobs": []}
-    slots, used = 0, set()
+    slots, named, used = 0, [], set()
     for nid, node in graph.items():
         title = _title(node)
         if not title.startswith(TITLE_PREFIX):
@@ -443,16 +534,23 @@ def scaffold(graph, info=None):
         if title.startswith(INPUT_PREFIX):
             slots += 1
             continue
+        if node["class_type"] == "LoadImage":
+            named.append({"name": title[len(TITLE_PREFIX):], "title": title})
+            continue
+        if "width" in node["inputs"] and "height" in node["inputs"] \
+                and "width" not in spec["bind"]:
+            spec["bind"]["width"] = [[title, "width"]]
+            spec["bind"]["height"] = [[title, "height"]]
         specs = _input_specs((info or {}).get(node["class_type"], {}))
         for key, value in node["inputs"].items():
             if _is_link(value):
                 continue
             if title == "nuke_prompt" and key in ("value", "text"):
                 spec["bind"].setdefault("prompt", []).append([title, key])
-            elif key == "seed" or key.endswith(".seed"):
+            elif key in ("width", "height") and [title, key] in spec["bind"].get(key, []):
+                continue
+            elif key.endswith("seed"):
                 spec["bind"].setdefault("seed", []).append([title, key])
-            elif title == "nuke_latent" and key in ("width", "height"):
-                spec["bind"].setdefault(key, []).append([title, key])
             elif title == "nuke_latent":
                 continue
             else:
@@ -466,7 +564,9 @@ def scaffold(graph, info=None):
                     knob["options"] = "server"
                 spec["knobs"].append(knob)
     if slots:
-        spec["images"] = {"max": min(slots, 4)}
+        spec["images"] = {"max": slots}
+    elif named:
+        spec["images"] = {"inputs": named}
     return spec
 
 

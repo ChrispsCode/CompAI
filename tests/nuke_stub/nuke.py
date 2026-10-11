@@ -62,9 +62,16 @@ class Knob(object):
 
     def fromUserText(self, v):
         self._value = v
+        if self._name == "file" and self.node is not None:
+            # like a real Read: the frame range comes from the file
+            self.node["first"].setValue(1)
+            self.node["last"].setValue(
+                56 if v.endswith((".mp4", ".mov")) else 1)
 
     def setExpression(self, e):
         self.expression = e
+        if e == "root.fps":            # the one expression we evaluate
+            self._value = _root.fps
 
     def setTooltip(self, t):
         self.tooltip = t
@@ -160,6 +167,7 @@ File_Knob = Multiline_Eval_String_Knob = String_Knob
 _AUTO_KNOBS = ("before after on_error resize filter black_outside format pbb "
                "type box_fixed box_width box_height file_type channels "
                "datatype create_directories disable colorspace file reload "
+               "first last frame_mode frame "
                "tile_color knobChanged").split()
 
 
@@ -170,9 +178,15 @@ class Node(object):
         self._knobs = {}
         self._inputs = list(inputs or [])
         self.children = {}
-        self.parent = _stack[-1] if _stack else None
+        self._parent = _stack[-1] if _stack else None
+        if self._name in _current():   # like Nuke: names are made unique
+            n = 1
+            while "%s%d" % (cls, n) in _current():
+                n += 1
+            self._name = "%s%d" % (cls, n)
         self._format = Format()
-        (self.parent.children if self.parent else _top)[self._name] = self
+        self._xy = (0, 0)
+        (self._parent.children if self._parent else _top)[self._name] = self
 
     def __getitem__(self, k):
         if k not in self._knobs:
@@ -196,11 +210,23 @@ class Node(object):
     def name(self):
         return self._name
 
+    def parent(self):
+        return self._parent or _root
+
+    def xpos(self):
+        return self._xy[0]
+
+    def ypos(self):
+        return self._xy[1]
+
+    def setXYpos(self, x, y):
+        self._xy = (x, y)
+
     def fullName(self):
         return self._name
 
     def setName(self, name):
-        owner = self.parent.children if self.parent else _top
+        owner = self._parent.children if self._parent else _top
         owner.pop(self._name, None)
         self._name = name
         owner[name] = self
@@ -215,6 +241,10 @@ class Node(object):
         while len(self._inputs) <= i:
             self._inputs.append(None)
         self._inputs[i] = node
+        while self._inputs and self._inputs[-1] is None:
+            self._inputs.pop()         # inputs() counts up to the last used
+        if "knobChanged" in self._knobs and self._knobs["knobChanged"].value():
+            fire_knob_changed(self, "inputChange")
 
     def format(self):
         return self._format
@@ -243,12 +273,20 @@ def createNode(cls, inpanel=True):
     return Node(cls)
 
 
+def delete(node):
+    (node._parent.children if node._parent else _top).pop(node.name(), None)
+
+
+def _current():
+    return _stack[-1].children if _stack and _stack[-1] else _top
+
+
 def toNode(name):
-    return (_stack[-1].children if _stack else _top).get(name)
+    return _current().get(name)
 
 
 def allNodes(cls=None):
-    pool = (_stack[-1].children if _stack else _top).values()
+    pool = _current().values()
     return [n for n in pool if cls is None or n.cls == cls]
 
 
@@ -285,17 +323,39 @@ def execute(write, first, last):
 
 
 class _Root(object):
+    """The script root. Entering it makes the top level the current context."""
     script = "Root"
+    children = _top
+    first_frame = 1001
+    fps = 24.0
+
+    def __getitem__(self, k):
+        return Knob(k, value=getattr(self, k))
 
     def name(self):
         return self.script
+
+    def __enter__(self):
+        _stack.append(None)
+
+    def __exit__(self, *a):
+        _stack.pop()
 
 
 _root = _Root()
 
 
+class _GroupAsRoot(object):
+    """Inside a group, real Nuke's root() is the group, not the script."""
+    def __getitem__(self, k):
+        raise NameError("root() called inside a group context: no knob " + k)
+
+    def name(self):
+        return _stack[-1].name()
+
+
 def root():
-    return _root
+    return _GroupAsRoot() if _stack and _stack[-1] else _root
 
 
 class _Menu(object):

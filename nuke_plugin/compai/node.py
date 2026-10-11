@@ -20,6 +20,8 @@ model: to add a model, add a workflow folder (see README).
 import os
 import random
 import re
+import shutil
+import tempfile
 
 import nuke
 
@@ -42,7 +44,7 @@ SRGB_CANDIDATES = ["sRGB", "Output - sRGB", "sRGB - Display",
 
 def add_menu():
     """One entry per installed workflow, under Comfy in the node menu."""
-    icon = os.path.join(os.path.dirname(__file__), "claude_icon.png")
+    icon = os.path.join(os.path.dirname(__file__), "claude_node_icon.png")
     menu = nuke.menu("Nodes").addMenu("Comfy", icon=icon)
     for name in workflows.names():
         try:
@@ -50,7 +52,9 @@ def add_menu():
         except ComfyError as e:
             print(">> compai: skipping workflow '%s': %s" % (name, e))
             continue
-        menu.addCommand(label, "import compai; compai.create(%r)" % name)
+        # "/" in a command name makes a submenu, so keep it out of labels
+        menu.addCommand(label.replace("/", "-"),
+                        "import compai; compai.create(%r)" % name)
 
 
 def create(name):
@@ -66,11 +70,12 @@ def create(name):
         g["tile_color"].setValue(int(wf.spec["tile_color"], 16))
 
     g.begin()
-    for i in range(1, wf.max_images + 1):
-        _add_input_chain(i)
-    read = _add_output_chain()
-    if wf.max_images:
-        _set_colorspace(read, "")
+    if wf.image_inputs is not None:    # named inputs: all there from the start
+        for i, item in enumerate(wf.image_inputs, start=1):
+            _add_input_chain(i, label=item["name"])
+    elif wf.max_images:
+        _add_input_chain(1)            # more appear as inputs get connected
+    _set_colorspace(_add_output_chain(), "")
     g.end()
     g["knobChanged"].setValue("import compai; compai.on_knob_changed()")
 
@@ -121,10 +126,11 @@ def _add_output_chain():
     return read
 
 
-def _add_input_chain(i):
+def _add_input_chain(i, colorspace="", label=None):
     """imgN -> prepN (scale to fill the size for Comfy, crop the overflow)
-    -> writeN (sRGB PNG, run on demand)."""
-    inp = nuke.nodes.Input(name="img%d" % i)
+    -> writeN (sRGB PNG, run on demand). The Input's name is what shows on
+    the node's pipe, so a named input (first, last) uses its name."""
+    inp = nuke.nodes.Input(name=label or "img%d" % i)
     prep = nuke.nodes.Reformat(name="prep%d" % i, inputs=[inp])
     prep["type"].setValue("to box")
     prep["box_fixed"].setValue(True)
@@ -139,7 +145,22 @@ def _add_input_chain(i):
     if "create_directories" in w.knobs():
         w["create_directories"].setValue(True)
     w["disable"].setValue(True)        # only enabled while we execute it
-    _set_colorspace(w, "")
+    _set_colorspace(w, colorspace)
+
+
+def _sync_inputs(node, max_images):
+    """Keep exactly one free input after the highest connected one, up to
+    the workflow's limit, the way Merge does. A gap lower down is left
+    alone: generating just skips it."""
+    connected = _connected_inputs(node)
+    want = min(max_images, connected[-1] + 2 if connected else 1)
+    with node:
+        have = len(nuke.allNodes("Input"))
+        for i in range(have + 1, want + 1):
+            _add_input_chain(i, node["png_colorspace"].value().strip())
+        for i in range(have, want, -1):
+            for name in ("write%d", "prep%d", "img%d"):
+                nuke.delete(nuke.toNode(name % i))
 
 
 # --------------------------------------------------------------------------
@@ -172,12 +193,12 @@ def _size_knobs(wf):
         match.setFlag(nuke.STARTLINE)
         knobs.append(match)
     mp = nuke.Double_Knob("megapixels", "megapixels")
-    mp.setRange(0.25, 2.5)
-    mp.setValue(1.0)
+    mp.setRange(*wf.megapixels_range)
+    mp.setValue(wf.megapixels)
     mp.setTooltip("Generation budget. The image is generated at about this "
                   "many megapixels, at the format's aspect, with both sides "
-                  "multiples of 16. A format that is already such a size at "
-                  "this budget is used exactly."
+                  "multiples of %d. A format that is already such a size at "
+                  "this budget is used exactly." % wf.multiple
                   + (" Each input image is sent at this budget too, at its "
                      "own aspect: scaled to fill and cropped, never stretched, "
                      "and untouched if it is already the right size."
@@ -200,7 +221,8 @@ def _output_knobs(wf):
     out = nuke.File_Knob("output_dir", "output dir")
     out.setValue("[getenv SHOT_ROOT]/gen")
     name = nuke.String_Knob("out_name", "name")
-    name.setValue("edit" if wf.max_images else "gen")
+    name.setValue(wf.spec.get("out_name")
+                  or ("edit" if wf.max_images else "gen"))
     return [nuke.Text_Knob("div_output", ""), out, name]
 
 
@@ -211,7 +233,17 @@ def _action_knobs():
             nuke.PyScript_Knob("cancel", "Cancel", CALL % "on_cancel"),
             nuke.PyScript_Knob("reuse_seed", "Reuse last seed",
                                CALL % "on_reuse_seed"),
-            nuke.Text_Knob("status", "status", "idle")]
+            nuke.Text_Knob("status", "status", "idle"), _create_read_knob()]
+
+
+def _create_read_knob():
+    knob = nuke.PyScript_Knob("create_read", "Create Read",
+                              CALL % "on_create_read")
+    knob.setTooltip("Make a Read node of the current result next to this "
+                    "node, so it stays in the script when you generate again. "
+                    "It reads the raw generated file.")
+    knob.setFlag(nuke.STARTLINE)
+    return knob
 
 
 def _results_knobs():
@@ -230,7 +262,12 @@ def _settings_knobs(wf):
     name.setEnabled(False)
     host = nuke.String_Knob("host", "comfy host")
     host.setValue(DEFAULT_HOST)
-    knobs = [nuke.Tab_Knob("settings", "Settings"), name, host]
+    timeout = nuke.Int_Knob("timeout", "timeout (min)")
+    timeout.setValue(max(1, wf.timeout // 60))
+    timeout.setTooltip("Give up on a generation after this many minutes. "
+                       "Raise it for long, high-quality runs. Changing it "
+                       "doesn't affect a job that is already running.")
+    knobs = [nuke.Tab_Knob("settings", "Settings"), name, host, timeout]
     if wf.max_images:
         mode = nuke.Enumeration_Knob("input_mode", "image transfer",
                                      ["auto", "path", "upload"])
@@ -241,7 +278,21 @@ def _settings_knobs(wf):
         cs = nuke.String_Knob("png_colorspace", "PNG colorspace", "")
         cs.setTooltip("Colorspace for the PNGs sent to Comfy and the result read "
                       "back. Empty = first sRGB match in the current OCIO config.")
-        knobs += [mode, cs]
+        temp = nuke.Boolean_Knob("temp_inputs", "temporary input images")
+        temp.setTooltip("Off: the PNGs sent to Comfy are kept next to the "
+                        "result (name_v003_in1.png), so the run can be "
+                        "reopened in ComfyUI any time.\nOn: they are written "
+                        "to the system temp folder instead, which the system "
+                        "empties on reboot and sweeps of old files. They "
+                        "last long enough to check a run in ComfyUI now, "
+                        "but not for good.")
+        temp.setFlag(nuke.STARTLINE)
+        instant = nuke.Boolean_Knob("instant_cleanup", "instant cleanup")
+        instant.setTooltip("With temporary input images on: delete them as "
+                           "soon as the run ends, instead of leaving them "
+                           "for the system to clear.")
+        instant.clearFlag(nuke.STARTLINE)
+        knobs += [mode, cs, temp, instant]
     return knobs
 
 
@@ -286,6 +337,8 @@ def _workflow_knob(wf, spec, info):
         if spec.get("range"):
             knob.setRange(*spec["range"])
         knob.setValue(float(default))
+        if spec.get("expression"):     # e.g. fps following root.fps
+            knob.setExpression(spec["expression"])
     elif kind == "choice":
         knob = nuke.Enumeration_Knob(name, label,
                                      workflows.choice_options(wf, spec, info))
@@ -330,7 +383,11 @@ def on_knob_changed():
         with node:
             for n in nuke.allNodes("Write") + nuke.allNodes("Read"):
                 _set_colorspace(n, knob.value().strip())
-    if name in ("target_format", "megapixels", "match_input",
+    if name == "inputChange" and node.knob("match_input") is not None:
+        wf = _workflow(node)           # None if gone: leave the inputs alone
+        if wf is not None and wf.image_inputs is None and wf.max_images:
+            _sync_inputs(node, wf.max_images)
+    if name in ("target_format", "megapixels", "match_input", "temp_inputs",
                 "reformat_output", "inputChange", "showPanel"):
         _refresh(node)
     if name == "showPanel":
@@ -340,6 +397,25 @@ def on_knob_changed():
 def on_reuse_seed(node):
     node["seed"].setValue(node["last_seed"].value())
     node["random_seed"].setValue(False)
+
+
+def on_create_read(node):
+    with node:
+        source = nuke.toNode("ComfyRead")
+        path = source["file"].value()
+        colorspace = source["colorspace"].value()
+        frame_mode, frame = source["frame_mode"].value(), source["frame"].value()
+    if not path:
+        nuke.message("Nothing generated yet.")
+        return None
+    with node.parent():                # beside the group, not inside it
+        read = nuke.nodes.Read()
+        read["file"].fromUserText(path)
+        read["colorspace"].setValue(colorspace)
+        read["frame_mode"].setValue(frame_mode)     # a clip keeps its start frame
+        read["frame"].setValue(frame)
+        read.setXYpos(node.xpos() + 120, node.ypos())
+    return read
 
 
 def on_refresh_choices(node):
@@ -400,30 +476,66 @@ def on_generate(node):
     out_path = _next_output_path(node)
     params = dict(name=wf.name, values=values, out_path=out_path,
                   host=_host(node))
+    if node.knob("timeout") is not None and node["timeout"].value() > 0:
+        params["timeout"] = int(node["timeout"].value()) * 60
     summary = "%dx%d, seed %d..." % (values["width"], values["height"],
                                      values["seed"])
 
+    cleanup = None
     if connected:
-        # Write the reference PNGs (main thread, current frame)
-        stem, frame, images = os.path.splitext(out_path)[0], nuke.frame(), []
+        # Write the reference PNGs (main thread, current frame). Numbered
+        # slots are packed (img1 + img3 -> slots 1, 2); named inputs keep
+        # their own place, with None for the ones not connected.
+        stem, frame = os.path.splitext(out_path)[0], nuke.frame()
+        if node.knob("temp_inputs") is not None and node["temp_inputs"].value():
+            folder = tempfile.mkdtemp(prefix="compai_")
+            stem = os.path.join(folder, os.path.basename(stem))
+            if node.knob("instant_cleanup") is None \
+                    or node["instant_cleanup"].value():
+                cleanup = folder       # removed when the run ends
+            # otherwise it stays until the system clears its temp folder
+        named = wf.image_inputs is not None
+        images = [None] * wf.max_images if named else []
+        uploads = list(images)         # stable per-node names in Comfy's input
         try:
             for slot, idx in enumerate(connected, start=1):
-                path = "%s_in%d.png" % (stem, slot)
+                tag = wf.image_inputs[idx]["name"] if named else "in%d" % slot
+                path = "%s_%s.png" % (stem, tag)
                 _write_input(node, idx, path, frame)
-                images.append(path)
+                upload = "%s_%s.png" % (node.name(), tag)
+                if named:
+                    images[idx], uploads[idx] = path, upload
+                else:
+                    images.append(path)
+                    uploads.append(upload)
         except Exception as e:
+            if cleanup:
+                shutil.rmtree(cleanup, ignore_errors=True)
             nuke.message("Failed writing input images:\n%s" % e)
             return
-        params.update(images=images, input_mode=node["input_mode"].value(),
-                      upload_names=["%s_in%d.png" % (node.name(), s)
-                                    for s in range(1, len(images) + 1)])
-        summary = "%d ref(s), frame %d, %s" % (len(images), frame, summary)
-    jobs.start(node, workflows.generate, params, "queued " + summary)
+        params.update(images=images, upload_names=uploads,
+                      input_mode=node["input_mode"].value())
+        summary = "%d ref(s), frame %d, %s" % (len(connected), frame, summary)
+    jobs.start(node, workflows.generate, params, "queued " + summary, cleanup)
 
 
 # --------------------------------------------------------------------------
 # Helpers
 # --------------------------------------------------------------------------
+
+def _workflow(node):
+    """The node's workflow, or None if it can't be loaded. Cached, so this
+    is cheap enough for knobChanged."""
+    try:
+        return workflows.load_cached(node["comfy_workflow"].value())
+    except ComfyError:
+        return None
+
+
+def _multiple(node):
+    wf = _workflow(node)
+    return wf.multiple if wf is not None else 16
+
 
 def _host(node):
     return node["host"].value().strip() or DEFAULT_HOST
@@ -433,7 +545,8 @@ def _generation_size(node):
     f = node["target_format"].value()
     tw = f.width() * f.pixelAspect()   # square up anamorphic formats
     return comfy_client.generation_size(tw, f.height(),
-                                        node["megapixels"].value())
+                                        node["megapixels"].value(),
+                                        _multiple(node))
 
 
 def _output_dir(node):
@@ -449,7 +562,8 @@ def _output_dir(node):
 def _next_output_path(node):
     out_dir = _output_dir(node)
     name = re.sub(r"[^\w\-]+", "_", node["out_name"].value().strip()) or "gen"
-    pattern = re.compile(r"^%s_v(\d{3,})\.png$" % re.escape(name))
+    # any extension: results may be .png, .mp4, .mov, plus the .json sidecar
+    pattern = re.compile(r"^%s_v(\d{3,})\.\w+$" % re.escape(name))
     existing = []
     if os.path.isdir(out_dir):
         for f in os.listdir(out_dir):
@@ -457,6 +571,7 @@ def _next_output_path(node):
             if m:
                 existing.append(int(m.group(1)))
     version = max(existing) + 1 if existing else 1
+    # .png is a placeholder; the run saves with whatever Comfy produced
     return os.path.join(out_dir, "%s_v%03d.png" % (name, version))
 
 
@@ -468,7 +583,8 @@ def _write_input(node, input_index, path, frame):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     f = node.input(input_index).format()
     w, h = comfy_client.generation_size(f.width() * f.pixelAspect(), f.height(),
-                                        node["megapixels"].value())
+                                        node["megapixels"].value(),
+                                        _multiple(node))
     n = input_index + 1
     exact = (f.width(), f.height(), f.pixelAspect()) == (w, h, 1)
     with node:
@@ -497,12 +613,19 @@ def _refresh(node):
 
 
 def _do_refresh(node):
+    if node.knob("instant_cleanup") is not None:
+        node["instant_cleanup"].setEnabled(bool(node["temp_inputs"].value()))
     if node.knob("match_input") is not None:
         connected = _connected_inputs(node)
         if node["match_input"].value() and connected:
             _set_format(node["target_format"], node.input(connected[0]).format())
         node["target_format"].setEnabled(not node["match_input"].value())
-        if connected:
+        wf = _workflow(node)
+        if connected and wf is not None and wf.image_inputs is not None:
+            node["inputs_info"].setValue(
+                ", ".join(wf.image_inputs[i]["name"] for i in connected
+                          if i < len(wf.image_inputs)))
+        elif connected:
             node["inputs_info"].setValue(
                 ", ".join("img%d" % (i + 1) for i in connected)
                 + "  ->  slot(s) 1-%d" % len(connected))

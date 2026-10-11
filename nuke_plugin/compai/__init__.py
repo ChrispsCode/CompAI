@@ -50,6 +50,11 @@ def on_reuse_seed(n):
     node.on_reuse_seed(n)
 
 
+def on_create_read(n):
+    from . import node
+    node.on_create_read(n)
+
+
 def reload():
     """Pick up code changes without restarting Nuke. Existing nodes use the
     new code straight away; nodes are only rebuilt by creating them again."""

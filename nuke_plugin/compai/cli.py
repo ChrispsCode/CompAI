@@ -121,8 +121,9 @@ def cmd_run(args):
     for knob in wf.knobs:              # "true"/"0" etc. for bool knobs
         if knob["type"] == "bool" and isinstance(values.get(knob["name"]), str):
             values[knob["name"]] = values[knob["name"]].lower() in ("1", "true", "yes", "on")
+    images = [None if i == "-" else i for i in args.image]
     result = workflows.generate(args.name, values, args.out,
-                                images=args.image or None, host=args.host,
+                                images=images or None, host=args.host,
                                 input_mode=args.input_mode)
     if result.get("used_prompt") and result["used_prompt"] != args.prompt:
         print("\nPrompt used:\n" + result["used_prompt"])
@@ -153,13 +154,14 @@ def main(argv=None):
     c.add_argument("name")
     c.add_argument("--prompt", required=True)
     c.add_argument("--out", required=True)
-    c.add_argument("--width", type=int, default=1024)
-    c.add_argument("--height", type=int, default=1024)
+    c.add_argument("--width", type=int)
+    c.add_argument("--height", type=int)
     c.add_argument("--seed", type=int)
     c.add_argument("--set", action="append", default=[], metavar="KNOB=VALUE",
                    help="a workflow knob, e.g. --set steps=6 (repeatable)")
     c.add_argument("--image", action="append", default=[],
-                   help="input image (repeatable)")
+                   help="input image (repeatable; '-' leaves a named "
+                        "input such as 'first' empty)")
     c.add_argument("--input-mode", default="auto",
                    choices=["auto", "path", "upload"])
     c.set_defaults(fn=cmd_run)

@@ -12,6 +12,7 @@ What gets patched, and from which knob, is decided in workflows.py.
 import json
 import math
 import os
+import shutil
 import time
 import urllib.error
 import urllib.parse
@@ -93,14 +94,19 @@ def bind_images(workflow, images, mode="upload", prefix="nuke_input_"):
         raise ComfyError("Got %d images but template only has %d slots"
                          % (len(images), len(slots)))
     for nid, value in zip(slots, images):
-        if mode == "path":
-            workflow[nid] = {"inputs": {"path": value}, "class_type": PATH_LOADER,
-                             "_meta": workflow[nid].get("_meta", {})}
-        else:
-            workflow[nid]["inputs"]["image"] = value
+        set_image(workflow, nid, value, mode)
     for nid in slots[len(images):]:
         remove_node(workflow, nid)
     return len(slots)
+
+
+def set_image(workflow, node_id, value, mode="upload"):
+    """Point one LoadImage node at an image (see bind_images for mode)."""
+    if mode == "path":
+        workflow[node_id] = {"inputs": {"path": value}, "class_type": PATH_LOADER,
+                             "_meta": workflow[node_id].get("_meta", {})}
+    else:
+        workflow[node_id]["inputs"]["image"] = value
 
 
 def generation_size(target_w, target_h, megapixels=1.0, multiple=16):
@@ -232,7 +238,7 @@ class ComfyClient:
         return (sub + "/" if sub else "") + info["name"]
 
     def download(self, image_ref, dest_path):
-        """Fetch an output image via /view and write it to dest_path."""
+        """Fetch an output file (image or video) via /view to dest_path."""
         query = urllib.parse.urlencode({
             "filename": image_ref["filename"],
             "subfolder": image_ref.get("subfolder", ""),
@@ -241,7 +247,7 @@ class ComfyClient:
         os.makedirs(os.path.dirname(os.path.abspath(dest_path)), exist_ok=True)
         with urllib.request.urlopen(f"{self.base}/view?{query}", timeout=60) as r, \
                 open(dest_path, "wb") as f:
-            f.write(r.read())
+            shutil.copyfileobj(r, f)
         return dest_path
 
 
@@ -250,7 +256,8 @@ class ComfyClient:
 # --------------------------------------------------------------------------
 
 def output_images(entry, workflow, save_title):
-    """Image refs ({filename, subfolder, type}) produced by the titled save node."""
+    """File refs ({filename, subfolder, type}) produced by the titled save
+    node: images, or a video."""
     node_out = entry.get("outputs", {}).get(find_node(workflow, save_title), {})
     # SaveImage reports under "images"; scan all keys in case an advanced
     # save node uses a different one.
@@ -282,16 +289,22 @@ def find_node_by_class(workflow, class_type):
 # --------------------------------------------------------------------------
 
 def run_workflow(client, wf, out_path, info, save_title, should_cancel=None,
-                 log=print):
-    """Submit an already-patched workflow, wait, download, write sidecar."""
+                 log=print, timeout=900):
+    """Submit an already-patched workflow, wait, download, write sidecar.
+
+    out_path's extension is only a placeholder: the file is saved with the
+    extension Comfy produced (.png, .mp4, .mov ...), and the real path is
+    returned in the result."""
     t0 = time.time()
     pid = client.submit(wf)
     log("Queued %s" % pid)
-    entry = client.wait(pid, should_cancel=should_cancel)
+    entry = client.wait(pid, timeout=timeout, should_cancel=should_cancel)
     refs = output_images(entry, wf, save_title)
     if not refs:
-        raise ComfyError("Job finished but no images found. Outputs: %s"
+        raise ComfyError("Job finished but no output files found. Outputs: %s"
                          % list(entry.get("outputs", {})))
+    ext = os.path.splitext(refs[0]["filename"])[1]
+    out_path = os.path.splitext(out_path)[0] + (ext or ".png")
     client.download(refs[0], out_path)
     preview_id = find_node_by_class(wf, "PreviewAny")
     used_prompt = output_text(entry, preview_id) if preview_id else None

@@ -1,0 +1,80 @@
+{
+  "label": "Minimax_H3_fl2va",
+  "node_name": "MiniMaxVideo",
+  "tile_color": "0xB5562BFF",
+  "notes": [
+    "workflow.json is the source of truth from here on (Harry continues from it, not from his original export). Claude's edits to the original:",
+    "1. Load Image node 114 retitled nuke_load_image -> nuke_first_frame.",
+    "2. Added Load Image node 129 titled nuke_last_frame, wired to last_frame on nuke_MiniMaxH3_i2v.",
+    "3. Int nodes 105_124 and 105_125 retitled nuke_steps and nuke_lightning_steps.",
+    "4. Added PrimitiveFloat node 130 titled nuke_fps (24), wired to fps on nuke_create_video and to values.b on the Math Expression (105_107), whose expression now uses 'a * b' where it had 'a * 24'."
+  ],
+  "output": "nuke_save_video",
+  "out_name": "video",
+  "timeout": 3600,
+  "size": {"multiple": 32, "megapixels": 0.4, "megapixels_range": [0.2, 1.2]},
+  "bind": {
+    "prompt": [["nuke_prompt", "value"]],
+    "seed": [["nuke_random_noise", "noise_seed"]],
+    "width": [["nuke_MiniMaxH3_i2v", "width"]],
+    "height": [["nuke_MiniMaxH3_i2v", "height"]]
+  },
+  "images": {
+    "inputs": [
+      {"name": "first", "title": "nuke_first_frame"},
+      {"name": "last", "title": "nuke_last_frame"}
+    ]
+  },
+  "knobs": [
+    {
+      "name": "duration",
+      "label": "duration (s)",
+      "type": "float",
+      "default": 2,
+      "range": [1, 15],
+      "tooltip": "Length in seconds. The frame count is duration x fps, rounded up to the model's grid (5, 22, 39, 56 ... frames). The model was trained on about 5 to 15 s at 24 fps.",
+      "bind": [["nuke_duration", "value"]]
+    },
+    {
+      "name": "fps",
+      "type": "float",
+      "range": [12, 60],
+      "expression": "root.fps",
+      "tooltip": "Frame rate of the clip. Linked to the project's fps; remove the expression to set it by hand. The model was trained at 24 fps: at other rates motion plays slightly faster or slower, and the audio track no longer matches the picture's length.",
+      "bind": [["nuke_fps", "value"]]
+    },
+    {
+      "name": "steps",
+      "type": "int",
+      "tooltip": "Sampling steps when the lightning LoRA is off.",
+      "bind": [["nuke_steps", "value"]]
+    },
+    {
+      "name": "lightning",
+      "label": "lightning LoRA",
+      "type": "bool",
+      "tooltip": "Use the turbo LoRA with its own, much lower, step count. Much faster, lower quality.",
+      "bind": [["nuke_enable_lightning_LoRA", "value"]]
+    },
+    {
+      "name": "lightning_steps",
+      "label": "lightning steps",
+      "type": "int",
+      "tooltip": "Sampling steps when the lightning LoRA is on. The LoRA is made for 8.",
+      "bind": [["nuke_lightning_steps", "value"]]
+    },
+    {
+      "name": "codec",
+      "type": "choice",
+      "default": "ProRes_422_4:2:2_10bit_(~147Mbps)",
+      "options": [
+        "ProRes_422_4:2:2_10bit_(~147Mbps)",
+        "ProRes_HQ_4:2:2_10bit_(~220Mbps)",
+        "ProRes_4444_4:4:4_12bit_(~330Mbps)",
+        "H264_AllI_4:2:2_10bit_CRF12"
+      ],
+      "tooltip": "How ComfyUI encodes the video that Nuke reads back. All are intra-frame, so scrubbing in Nuke is fast. H.265 is left out because Nuke can't read it.",
+      "bind": [["nuke_save_video", "preset"]]
+    }
+  ]
+}

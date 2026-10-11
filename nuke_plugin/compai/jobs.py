@@ -9,6 +9,7 @@ used_prompt, and an internal Read named ComfyRead. node.py provides them.
 """
 
 import os
+import shutil
 import threading
 import traceback
 
@@ -33,15 +34,16 @@ def release_stale_lock(node):
         node["generate"].setEnabled(True)
 
 
-def start(node, fn, params, summary):
+def start(node, fn, params, summary, cleanup=None):
     """Run fn(should_cancel=..., log=..., **params) in the background. fn
-    returns a dict with at least path, seconds, and seed/prompt if used."""
+    returns a dict with at least path, seconds, and seed/prompt if used.
+    cleanup is a directory to delete once the job ends, however it ends."""
     key = node.fullName()
     cancel = threading.Event()
     _JOBS[key] = cancel
     node["generate"].setEnabled(False)
     _status(key, summary)
-    threading.Thread(target=_worker, args=(key, fn, params, cancel),
+    threading.Thread(target=_worker, args=(key, fn, params, cancel, cleanup),
                      name="ComfyJob:" + key, daemon=True).start()
 
 
@@ -52,10 +54,14 @@ def on_cancel(node):
         _status(node.fullName(), "cancelling...")
 
 
-def _worker(key, fn, params, cancel):
+def _worker(key, fn, params, cancel, cleanup=None):
     try:
-        result = fn(should_cancel=cancel.is_set,
-                    log=lambda msg: _status(key, msg), **params)
+        try:
+            result = fn(should_cancel=cancel.is_set,
+                        log=lambda msg: _status(key, msg), **params)
+        finally:
+            if cleanup:                # before reporting, so it's gone by then
+                shutil.rmtree(cleanup, ignore_errors=True)
         nuke.executeInMainThread(_on_done, args=(key, result))
     except Exception as e:  # report everything back to the UI
         traceback.print_exc()
@@ -68,9 +74,21 @@ def _on_done(key, result):
     if node is None:          # node deleted while generating
         return
     node["generate"].setEnabled(True)
+    # Ask before entering the group: inside it, nuke.root() is the group.
+    script_first = int(nuke.root()["first_frame"].value())
     with node:
         read = nuke.toNode("ComfyRead")
-        read["file"].fromUserText(result["path"])
+        colorspace = read["colorspace"].value()
+        read["file"].fromUserText(result["path"])   # sets the range of a video
+        read["colorspace"].setValue(colorspace)     # a new file type resets it
+        if read["last"].value() > read["first"].value():
+            # A clip starts at the script's first frame. Set as a number:
+            # an expression in this knob is not evaluated.
+            read["frame_mode"].setValue("start at")
+            read["frame"].setValue(str(script_first))
+        else:
+            read["frame_mode"].setValue("expression")
+            read["frame"].setValue("")
         read["reload"].execute()
     node["last_file"].setValue(os.path.basename(result["path"]))
     if result.get("seed") is not None:

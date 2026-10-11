@@ -107,7 +107,7 @@ class Patching(unittest.TestCase):
 
     def test_edit_prunes_unused_slots(self):
         wf = workflows.load("qwen_edit")
-        for n in (1, 2, 4):
+        for n in (1, 2, 4, 10):
             for mode in ("upload", "path"):
                 imgs = ["/x/in%d.png" % i for i in range(n)]
                 g = workflows.build(wf, dict(prompt="p", width=1024, height=1024),
@@ -122,6 +122,38 @@ class Patching(unittest.TestCase):
                     self.assertEqual(first["inputs"]["image"], imgs[0])
                 self.assertIs(titled(g, "nuke_size_switch")["inputs"]["switch"],
                               True)
+
+    def test_named_inputs_are_each_optional(self):
+        wf = workflows.load("minimax_h3_fl2va")
+        values = dict(prompt="p", seed=4, width=864, height=480, duration=3)
+        for images, kept in ((["/a", "/b"], ["first_frame", "last_frame"]),
+                             (["/a", None], ["first_frame"]),
+                             ([None, "/b"], ["last_frame"]),
+                             (["/a"], ["first_frame"])):
+            g = workflows.build(wf, values, images, image_mode="path")
+            i2v = titled(g, "nuke_MiniMaxH3_i2v")["inputs"]
+            self.assertEqual([k for k in ("first_frame", "last_frame") if k in i2v],
+                             kept)
+            self.assertEqual(dangling(g), [])
+            self.assertEqual((i2v["width"], i2v["height"]), (864, 480))
+            self.assertEqual(titled(g, "nuke_duration")["inputs"]["value"], 3.0)
+        with self.assertRaises(cc.ComfyError):
+            workflows.build(wf, values, [None, None])
+
+    def test_size_settings_per_workflow(self):
+        video = workflows.load("minimax_h3_fl2va")
+        self.assertEqual((video.multiple, video.megapixels, video.timeout),
+                         (32, 0.4, 3600))
+        knobs = {k["name"]: k for k in video.knobs}
+        self.assertEqual(workflows.knob_default(video, knobs["duration"]), 2)
+        self.assertEqual(workflows.knob_default(video, knobs["steps"]), 20)
+        self.assertEqual(workflows.knob_default(video, knobs["lightning_steps"]), 8)
+        self.assertTrue(workflows.knob_default(video, knobs["codec"])
+                        .startswith("ProRes_422_"))
+        still = workflows.load_cached("qwen_t2i")
+        self.assertEqual((still.multiple, still.megapixels, still.timeout),
+                         (16, 1.0, 900))
+        self.assertEqual(cc.generation_size(1920, 1080, 0.4, 32), (864, 480))
 
     def test_image_count_errors(self):
         with self.assertRaises(cc.ComfyError):
@@ -182,17 +214,32 @@ class Checking(unittest.TestCase):
         titled(g, "nuke_input_10")["_meta"]["title"] = "Load Image"
         self.assertProblem(workflows.lint_graph(g), "baked in")
 
+    def test_undeclared_load_image(self):
+        wf = workflows.load("minimax_h3_fl2va")
+        spec = copy.deepcopy(wf.spec)
+        spec["images"]["inputs"].pop()               # forget the last frame
+        problems = workflows.validate(workflows.Workflow("t", spec, wf.graph))
+        self.assertProblem(problems, "'nuke_last_frame' is not declared")
+
+    def test_numeric_combo_options(self):
+        info = {"CreateVideo": {"input": {"optional": {"bit_depth": [
+            "COMBO", {"options": ["auto", 8, 10]}]}}}}
+        graph = {"1": {"class_type": "CreateVideo", "inputs": {"bit_depth": 8},
+                       "_meta": {"title": "x"}}}
+        self.assertEqual(workflows.check_server(graph, info), [])
+
     def test_definition_problems(self):
         wf = workflows.load("z_image_turbo_t2i")
         spec = copy.deepcopy(wf.spec)
         spec["output"] = "nuke_save"
+        spec["label"] = "First/Last"
         spec["bind"]["seed"] = [["nuke_ksampler", "sead"]]
         spec["bind"]["cfg"] = [["nuke_ksampler", "cfg"]]
         spec["knobs"] += [{"name": "seed", "type": "int", "bind": [["nuke_ksampler", "cfg"]]},
                           {"name": "mode", "type": "choice", "bind": [["nuke_ksampler", "scheduler"]]},
                           {"name": "x", "type": "slider", "bind": []}]
         problems = workflows.validate(workflows.Workflow("t", spec, wf.graph))
-        for text in ("No node titled 'nuke_save'", "no input 'sead'",
+        for text in ("No node titled 'nuke_save'", "no input 'sead'", "submenu",
                      "not a standard value", "taken by a standard knob",
                      "a choice needs", "type must be one of", "needs \"bind\""):
             self.assertProblem(problems, text)
@@ -219,8 +266,13 @@ class Checking(unittest.TestCase):
         knobs = {k["name"]: k for k in draft["knobs"]}
         self.assertEqual(knobs["unet_name"]["type"], "choice")
         self.assertEqual(knobs["steps"]["type"], "int")
+        video = workflows.scaffold(workflows.load("minimax_h3_fl2va").graph)
+        self.assertEqual(video["bind"]["seed"], [["nuke_random_noise", "noise_seed"]])
+        self.assertEqual(video["bind"]["width"], [["nuke_MiniMaxH3_i2v", "width"]])
+        self.assertEqual([i["name"] for i in video["images"]["inputs"]],
+                         ["first_frame", "last_frame"])
         edit = workflows.scaffold(workflows.load("qwen_edit").graph)
-        self.assertEqual(edit["images"], {"max": 4})
+        self.assertEqual(edit["images"], {"max": 10})
         self.assertEqual(len(edit["bind"]["seed"]), 2)
 
 
@@ -296,6 +348,17 @@ class Running(WithFakeComfy):
         with self.assertRaises(cc.ComfyError):
             self.run_wf("qwen_edit", images=[self.plate()], input_mode="path")
 
+    def test_video_result_keeps_its_extension(self):
+        r = self.run_wf("minimax_h3_fl2va", images=[None, self.plate()],
+                        upload_names=[None, "N_last.png"])
+        self.assertTrue(r["path"].endswith("out_v001.mp4"), r["path"])
+        self.assertTrue(os.path.isfile(r["path"]))
+        self.assertTrue(os.path.isfile(os.path.join(self.tmp, "sub", "out_v001.json")))
+        self.assertEqual(r["images"][0], None)
+        self.assertEqual(titled(self.submitted(), "nuke_last_frame")["inputs"]["image"],
+                         "nuke/N_last.png")
+        self.assertEqual(len(self.comfy.uploads), 1)
+
     def test_cancel_interrupts(self):
         self.comfy.hold = True
         with self.assertRaises(cc.ComfyError) as ctx:
@@ -340,7 +403,8 @@ class NukeNodes(WithFakeComfy):
         importlib.reload(menu)
         commands = nuke.menu("Nodes").commands
         self.assertEqual(sorted(commands),
-                         ["Qwen Image", "Qwen Image Edit", "Z-Image Turbo"])
+                         ["Minimax_H3_fl2va", "Qwen Image",
+                          "Qwen Image Edit", "Z-Image Turbo"])
         nuke.menu("Nodes").run("Z-Image Turbo")
         self.assertIn("ZImageTurbo1", [n.name() for n in nuke.allNodes()])
 
@@ -349,18 +413,20 @@ class NukeNodes(WithFakeComfy):
             g = compai.create(name)
             for knob in ("prompt seed random_seed target_format megapixels "
                          "gen_size output_dir out_name generate cancel "
-                         "reuse_seed status last_file last_seed used_prompt "
+                         "reuse_seed status create_read last_file last_seed used_prompt "
                          "comfy_workflow host").split():
                 self.assertIsNotNone(g.knob(knob), "%s.%s" % (name, knob))
             self.assertEqual(g["comfy_workflow"].value(), name)
             self.assertIs(g["reformat_output"].value(), False)     # raw by default
             self.assertEqual(g.children["ToTarget"]["disable"].expression,
                              "!parent.reformat_output")
-            self.assertEqual(g["gen_size"].value(), "1408 x 736")
+            size = "%d x %d" % cc.generation_size(
+                2048, 1080, g["megapixels"].value(), workflows.load(name).multiple)
+            self.assertEqual(g["gen_size"].value(), size)
             g["reformat_output"].setValue(True)
             nuke.fire_knob_changed(g, "reformat_output")
             self.assertEqual(g["gen_size"].value(),
-                             "1408 x 736  ->  reformat to 2048 x 1080")
+                             size + "  ->  reformat to 2048 x 1080")
             self.assertEqual(g.knob("match_input") is not None,
                              bool(workflows.load(name).max_images))
 
@@ -387,9 +453,17 @@ class NukeNodes(WithFakeComfy):
         self.assertEqual(titled(sent, "nuke_prompt")["inputs"]["value"],
                          "a ring in a box")
 
+        g.setXYpos(40, 70)
+        g["create_read"].execute()                   # keep v001 in the script
+        kept = [n for n in nuke.allNodes("Read")]
+        self.assertEqual(len(kept), 1)               # beside the group, not in it
+        self.assertEqual(kept[0]["file"].value(), out)
+        self.assertEqual((kept[0].xpos(), kept[0].ypos()), (160, 70))
+
         g["generate"].execute()                      # versions up
         self.wait_idle(g)
         self.assertEqual(g["last_file"].value(), "gen_v002.png")
+        self.assertEqual(kept[0]["file"].value(), out)   # still v001
         g["reuse_seed"].execute()
         self.assertIs(g["random_seed"].value(), False)
 
@@ -415,12 +489,37 @@ class NukeNodes(WithFakeComfy):
 
     def test_validation_messages(self):
         g = compai.create("qwen_t2i")
+        g["create_read"].execute()
+        self.assertEqual(nuke.messages.pop(), "Nothing generated yet.")
         g["generate"].execute()
         self.assertEqual(nuke.messages, ["Enter a prompt first."])
         g["comfy_workflow"].setValue("no_such_workflow")
         g["generate"].execute()
         self.assertIn("Can't load workflow", nuke.messages[-1])
         self.assertIsNone(compai.create("no_such_workflow"))
+
+    def test_timeout_knob_is_passed_on(self):
+        self.comfy.hold = True                   # the job never finishes
+        g = self.make("qwen_t2i")
+        self.assertEqual(g["timeout"].value(), 15)
+        seen = {}
+        real = cc.ComfyClient.wait
+        def wait(client, pid, timeout=900, **kw):
+            seen["timeout"] = timeout
+            raise cc.ComfyError("Timed out after %ss" % timeout)
+        cc.ComfyClient.wait = wait
+        self.addCleanup(setattr, cc.ComfyClient, "wait", real)
+        g["timeout"].setValue(90)
+        g["generate"].execute()
+        self.wait_idle(g)
+        self.assertEqual(seen["timeout"], 5400)
+        self.assertIn("Timed out", nuke.messages[-1])
+
+    def test_still_result_has_no_start_frame(self):
+        g = self.make("qwen_t2i")
+        g["generate"].execute()
+        self.wait_idle(g)
+        self.assertEqual(g.children["ComfyRead"]["frame_mode"].value(), "expression")
 
     def test_error_is_reported_and_node_unlocks(self):
         g = self.make("qwen_t2i")
@@ -455,10 +554,21 @@ class NukeNodes(WithFakeComfy):
         g["generate"].execute()
         self.assertEqual(nuke.messages, ["Connect at least one image input."])
 
+        def inputs():
+            return sorted(n.name() for n in g.children.values() if n.cls == "Input")
+
+        self.assertEqual(inputs(), ["img1"])     # one free input to start
         plate = nuke.nodes.Read(name="plate")
-        g.setInput(0, None)
-        g.setInput(2, plate)                     # img3 only -> slot 1
-        nuke.fire_knob_changed(g, "inputChange")
+        other = nuke.nodes.Read(name="other")
+        g.setInput(0, other)
+        self.assertEqual(inputs(), ["img1", "img2"])
+        g.setInput(1, other)
+        g.setInput(2, plate)
+        self.assertEqual(inputs(), ["img1", "img2", "img3", "img4"])
+        g.setInput(1, None)                      # a gap in the middle: no change
+        self.assertEqual(inputs(), ["img1", "img2", "img3", "img4"])
+        g.setInput(0, None)                      # img3 only -> slot 1
+        self.assertEqual(inputs(), ["img1", "img2", "img3", "img4"])
         self.assertIn("img3", g["inputs_info"].value())
         self.assertEqual(g["target_format"].value().name(), "2K_DCP")
         plate._format = nuke.Format(1234, 700, 2.0, "")      # unnamed format
@@ -485,6 +595,110 @@ class NukeNodes(WithFakeComfy):
         self.assertEqual(titled(sent, "nuke_input_1")["inputs"]["image"],
                          "nuke/QwenEdit1_in1.png")
         self.assertIs(titled(sent, "nuke_enhance_switch")["inputs"]["switch"], True)
+
+        g.setInput(2, None)                      # top one removed: shrink back
+        self.assertEqual(inputs(), ["img1"])
+        self.assertIsNone(g.children.get("write3"))
+
+    def test_video_node_with_first_and_last_inputs(self):
+        g = self.make("minimax_h3_fl2va")
+        def inputs():
+            return sorted(n.name() for n in g.children.values() if n.cls == "Input")
+        self.assertEqual(inputs(), ["first", "last"])
+        self.assertEqual(g["megapixels"].value(), 0.4)
+        self.assertEqual(g["gen_size"].value(), "896 x 480")     # 32 grid
+        self.assertEqual((g["duration"].value(), g["steps"].value(),
+                          g["lightning_steps"].value()), (2.0, 20, 8))
+        self.assertEqual(g["fps"].expression, "root.fps")        # follows project
+        self.assertEqual(g["timeout"].value(), 60)               # minutes
+        g["generate"].execute()
+        self.assertEqual(nuke.messages, ["Connect at least one image input."])
+
+        g.setInput(1, nuke.nodes.Read(name="plate"))             # last only
+        self.assertEqual(inputs(), ["first", "last"])            # fixed, no growing
+        self.assertEqual(g["inputs_info"].value(), "last")
+        g["duration"].setValue(3)
+        g["generate"].execute()
+        self.wait_idle(g)
+        self.assertEqual(nuke.messages[1:], [])
+        self.assertEqual(g["last_file"].value(), "video_v001.mp4")
+        self.assertTrue(g.children["ComfyRead"]["file"].value().endswith(".mp4"))
+        self.assertTrue(os.path.isfile(os.path.join(self.tmp, "video_v001_last.png")))
+        sent = self.submitted()
+        self.assertNotIn("first_frame", titled(sent, "nuke_MiniMaxH3_i2v")["inputs"])
+        self.assertEqual(titled(sent, "nuke_last_frame")["inputs"]["image"],
+                         "nuke/MiniMaxVideo1_last.png")
+        self.assertEqual(titled(sent, "nuke_duration")["inputs"]["value"], 3.0)
+        self.assertEqual(titled(sent, "nuke_fps")["inputs"]["value"], 24.0)
+        self.assertTrue(titled(sent, "nuke_save_video")["inputs"]["preset"]
+                        .startswith("ProRes_422_"))
+        read = g.children["ComfyRead"]           # clip starts at the script's first frame
+        self.assertEqual((read["frame_mode"].value(), read["frame"].value()),
+                         ("start at", "1001"))
+        g["create_read"].execute()
+        kept = [n for n in nuke.allNodes("Read") if n.name() != "plate"][0]
+        self.assertEqual((kept["frame_mode"].value(), kept["frame"].value()),
+                         ("start at", "1001"))
+
+        g["generate"].execute()                  # versions past the .mp4
+        self.wait_idle(g)
+        self.assertEqual(g["last_file"].value(), "video_v002.mp4")
+
+    def test_temporary_inputs_are_deleted_after_the_run(self):
+        g = self.make("qwen_edit")
+        self.assertIs(g["temp_inputs"].value(), False)           # kept by default
+        self.assertIsNone(compai.create("qwen_t2i").knob("temp_inputs"))
+        self.assertFalse(g["instant_cleanup"].enabled())         # nothing to clean
+        g.setInput(0, nuke.nodes.Read(name="plate"))
+        g["temp_inputs"].setValue(True)
+        nuke.fire_knob_changed(g, "temp_inputs")
+        self.assertTrue(g["instant_cleanup"].enabled())
+        self.assertIs(g["instant_cleanup"].value(), False)       # off by default
+        written = []
+        real = nuke.execute
+        def execute(write, first, last):
+            written.append(write["file"].value())
+            real(write, first, last)
+        nuke.execute = execute
+        self.addCleanup(setattr, nuke, "execute", real)
+        g["generate"].execute()
+        self.wait_idle(g)
+        self.assertEqual(nuke.messages, [])
+        self.assertEqual(len(written), 1)
+        self.assertFalse(written[0].startswith(self.tmp))        # not beside the result
+        self.assertTrue(written[0].startswith(tempfile.gettempdir()))
+        self.assertTrue(os.path.isfile(written[0]))              # still there to inspect
+        self.addCleanup(shutil.rmtree, os.path.dirname(written[0]), True)
+        self.assertEqual(sorted(os.listdir(self.tmp)),
+                         ["edit_v001.json", "edit_v001.png"])
+
+        g["instant_cleanup"].setValue(True)                      # now delete at once
+        g["generate"].execute()
+        self.wait_idle(g)
+        self.assertEqual(len(written), 2)
+        self.assertFalse(os.path.exists(os.path.dirname(written[1])))
+        self.assertIn(b"fake png", self.comfy.uploads[0])        # Comfy still got it
+
+    def test_temporary_inputs_are_deleted_when_the_run_fails(self):
+        g = self.make("qwen_edit")
+        g.setInput(0, nuke.nodes.Read(name="plate"))
+        g["temp_inputs"].setValue(True)
+        g["instant_cleanup"].setValue(True)
+        g["host"].setValue("127.0.0.1:9")
+        before = set(os.listdir(tempfile.gettempdir()))
+        g["generate"].execute()
+        self.wait_idle(g)
+        self.assertIn("failed", nuke.messages[-1])
+        left = [d for d in set(os.listdir(tempfile.gettempdir())) - before
+                if d.startswith("compai_")]
+        self.assertEqual(left, [])
+
+    def test_inputs_stop_at_the_workflow_limit(self):
+        g = self.make("qwen_edit")
+        plate = nuke.nodes.Read(name="plate")
+        for i in range(10):
+            g.setInput(i, plate)
+        self.assertEqual(len([n for n in g.children.values() if n.cls == "Input"]), 10)
 
 
 if __name__ == "__main__":

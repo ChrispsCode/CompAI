@@ -94,7 +94,9 @@ class FakeComfy(object):
         outputs = {}
         for nid, node in wf.items():
             if node["_meta"]["title"].startswith("nuke_save"):
-                outputs[nid] = {"images": [{"filename": "out_00001_.png",
+                name = "out_00001_.mp4" if "Video" in node["class_type"] \
+                    else "out_00001_.png"          # like the real save nodes
+                outputs[nid] = {"images": [{"filename": name,
                                             "subfolder": "nuke", "type": "output"}]}
             if node["class_type"] == "PreviewAny":
                 outputs[nid] = {"text": ["the prompt that was used"]}
