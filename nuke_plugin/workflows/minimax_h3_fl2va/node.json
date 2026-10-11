@@ -7,12 +7,21 @@
     "1. Load Image node 114 retitled nuke_load_image -> nuke_first_frame.",
     "2. Added Load Image node 129 titled nuke_last_frame, wired to last_frame on nuke_MiniMaxH3_i2v.",
     "3. Int nodes 105_124 and 105_125 retitled nuke_steps and nuke_lightning_steps.",
-    "4. Added PrimitiveFloat node 130 titled nuke_fps (24), wired to fps on nuke_create_video and to values.b on the Math Expression (105_107), whose expression now uses 'a * b' where it had 'a * 24'."
+    "4. Added PrimitiveFloat node 130 titled nuke_fps (24), wired to fps on nuke_create_video and to values.b on the Math Expression (105_107), whose expression now uses 'a * b' where it had 'a * 24'.",
+    "5. The video Load VAE (105_11) titled nuke_load_video_vae, for the video VAE dropdown."
   ],
   "output": "nuke_save_video",
   "out_name": "video",
   "timeout": 3600,
-  "size": {"multiple": 32, "megapixels": 0.4, "megapixels_range": [0.2, 1.2]},
+  "length": {
+    "seconds": "duration",
+    "fps": "fps"
+  },
+  "size": {
+    "multiple": 32,
+    "megapixels": 0.4,
+    "megapixels_range": [0.2, 1.2]
+  },
   "bind": {
     "prompt": [["nuke_prompt", "value"]],
     "seed": [["nuke_random_noise", "noise_seed"]],
@@ -21,11 +30,34 @@
   },
   "images": {
     "inputs": [
-      {"name": "first", "title": "nuke_first_frame"},
-      {"name": "last", "title": "nuke_last_frame"}
+      {
+        "name": "first",
+        "title": "nuke_first_frame"
+      },
+      {
+        "name": "last",
+        "title": "nuke_last_frame"
+      }
     ]
   },
   "knobs": [
+    {
+      "name": "model",
+      "type": "choice",
+      "options": "server",
+      "match": "minimax_h3_fl2va",
+      "tooltip": "Diffusion model file: the MiniMax H3 first/last-frame models installed in ComfyUI. Variants differ in precision (int8, bf16, fp16 ...): higher precision is better quality but needs more VRAM and time.",
+      "bind": [["nuke_load_diffusion_model", "unet_name"]]
+    },
+    {
+      "name": "video_vae",
+      "label": "video VAE",
+      "type": "choice",
+      "options": "server",
+      "match": "minimax_h3_video_vae",
+      "tooltip": "The model that turns the result into pixels (and encodes the inputs). Variants differ in precision: fp16 is higher quality than int8 and needs more VRAM.",
+      "bind": [["nuke_load_video_vae", "vae_name"]]
+    },
     {
       "name": "duration",
       "label": "duration (s)",

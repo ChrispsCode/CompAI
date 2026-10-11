@@ -20,6 +20,8 @@ node.json keys (see README "Workflow definitions" for the full reference):
                                    and "resize"
     videos                         {"max": N} for numbered nuke_video_N
                                    Load Video slots; optional "min"
+    length                         {"seconds": knob, "fps": knob}: which of
+                                   the knobs set the output's length
     size                           {"multiple", "megapixels", "megapixels_range"}
     timeout                        seconds to wait for a run (default 900)
     knobs                          the workflow-specific knob block
@@ -49,7 +51,8 @@ LOADERS = ("LoadImage", "LoadVideo")       # nodes whose file Nuke supplies
 # the ones Nuke puts on every node.
 RESERVED = set("""
     prompt seed random_seed match_input target_format megapixels gen_size
-    reformat_output inputs_info video_range video_first video_last output_dir out_name generate cancel reuse_seed status
+    reformat_output inputs_info video_range video_first video_last video_info
+    output_dir out_name generate cancel reuse_seed status
     last_file last_seed used_prompt comfy_workflow host input_mode
     png_colorspace temp_inputs instant_cleanup refresh_choices create_read timeout
     name label disable selected xpos ypos tile_color note_font
@@ -312,6 +315,10 @@ def validate(wf):
             if options != "server" and not (isinstance(options, list) and options):
                 problems.append("%s: a choice needs \"options\": a list, or "
                                 "\"server\" to ask ComfyUI." % what)
+
+    for role in ("seconds", "fps") if "length" in spec else ():
+        if spec["length"].get(role) not in seen:
+            problems.append("length.%s must name one of the knobs." % role)
 
     claimed = set()
     if wf.image_inputs is not None:

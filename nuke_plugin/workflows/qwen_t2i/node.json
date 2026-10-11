@@ -2,6 +2,10 @@
   "label": "Qwen Image",
   "node_name": "QwenImage",
   "tile_color": "0x6A4C93FF",
+  "notes": [
+    "workflow.json is the source of truth (Harry continues from it). Claude's edits to the original export:",
+    "Load Diffusion Model (459_451) titled nuke_load_diffusion_model, for the model dropdown."
+  ],
   "output": "nuke_save",
   "bind": {
     "prompt": [["nuke_prompt", "value"]],
@@ -10,6 +14,14 @@
     "height": [["nuke_latent", "height"]]
   },
   "knobs": [
+    {
+      "name": "model",
+      "type": "choice",
+      "options": "server",
+      "match": "^qwen_image_2",
+      "tooltip": "Diffusion model file: the Qwen Image models installed in ComfyUI. Variants differ in precision (int8, bf16, fp16 ...): higher precision is better quality but needs more VRAM and time.",
+      "bind": [["nuke_load_diffusion_model", "unet_name"]]
+    },
     {
       "name": "enhance",
       "label": "enhance prompt",

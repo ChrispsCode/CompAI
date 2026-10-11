@@ -50,6 +50,22 @@ class InstalledWorkflows(unittest.TestCase):
             self.assertEqual(workflows.validate(wf), [], name)
             self.assertTrue(wf.label and wf.node_name, name)
 
+    def test_every_workflow_has_a_model_dropdown(self):
+        for name in workflows.names():
+            wf = workflows.load(name)
+            knobs = {k["name"]: k for k in wf.knobs}
+            model = knobs["model"]
+            self.assertEqual((model["type"], model["options"]), ("choice", "server"))
+            self.assertEqual(workflows.server_class(wf, model), "UNETLoader", name)
+            default = workflows.knob_default(wf, model)
+            self.assertRegex(default, model["match"], name)   # the filter keeps it
+            if "video_vae" in knobs:
+                vae = knobs["video_vae"]
+                self.assertEqual(workflows.server_class(wf, vae), "VAELoader")
+                self.assertRegex(workflows.knob_default(wf, vae), vae["match"])
+        self.assertIn("video_vae", {k["name"] for k in
+                                    workflows.load("minimax_h3_fl2va").knobs})
+
     def test_all_build_without_dangling_links(self):
         for name in workflows.names():
             wf = workflows.load(name)
@@ -585,11 +601,13 @@ class NukeNodes(WithFakeComfy):
         g.setInput(1, other)
         g.setInput(2, plate)
         self.assertEqual(inputs(), ["img1", "img2", "img3", "img4"])
-        g.setInput(1, None)                      # a gap in the middle: no change
-        self.assertEqual(inputs(), ["img1", "img2", "img3", "img4"])
-        g.setInput(0, None)                      # img3 only -> slot 1
-        self.assertEqual(inputs(), ["img1", "img2", "img3", "img4"])
-        self.assertIn("img3", g["inputs_info"].value())
+        g.setInput(1, None)                      # pull the middle one:
+        self.assertEqual(inputs(), ["img1", "img2", "img3"])     # the rest move down
+        self.assertEqual([g.input(i) for i in range(3)], [other, plate, None])
+        g.setInput(0, None)                      # and again
+        self.assertEqual(inputs(), ["img1", "img2"])
+        self.assertEqual([g.input(i) for i in range(2)], [plate, None])
+        self.assertIn("img1", g["inputs_info"].value())
         self.assertEqual(g["target_format"].value().name(), "2K_DCP")
         plate._format = nuke.Format(1234, 700, 2.0, "")      # unnamed format
         nuke.fire_knob_changed(g, "inputChange")
@@ -601,14 +619,14 @@ class NukeNodes(WithFakeComfy):
         self.assertEqual(nuke.messages[1:], [])
         self.assertTrue(os.path.isfile(os.path.join(self.tmp, "edit_v001_in1.png")))
         self.assertEqual(g["last_file"].value(), "edit_v001.png")
-        self.assertTrue(g.children["write3"]["disable"].value())
-        self.assertEqual(g.children["prep3"]["resize"].value(), "fill")
-        self.assertFalse(g.children["prep3"]["disable"].value())   # resized
+        self.assertTrue(g.children["write1"]["disable"].value())
+        self.assertEqual(g.children["prep1"]["resize"].value(), "fill")
+        self.assertFalse(g.children["prep1"]["disable"].value())   # resized
 
         plate._format = nuke.Format(1360, 768, 1.0, "")   # already at budget
         g["generate"].execute()
         self.wait_idle(g)
-        self.assertTrue(g.children["prep3"]["disable"].value())    # untouched
+        self.assertTrue(g.children["prep1"]["disable"].value())    # untouched
         self.assertEqual(titled(self.submitted(), "nuke_latent")["inputs"]["width"], 1360)
         sent = self.submitted()
         self.assertEqual(len(cc.image_slots(sent)), 1)
@@ -616,9 +634,9 @@ class NukeNodes(WithFakeComfy):
                          "nuke/QwenEdit1_in1.png")
         self.assertIs(titled(sent, "nuke_enhance_switch")["inputs"]["switch"], True)
 
-        g.setInput(2, None)                      # top one removed: shrink back
+        g.setInput(0, None)                      # last one removed: shrink back
         self.assertEqual(inputs(), ["img1"])
-        self.assertIsNone(g.children.get("write3"))
+        self.assertIsNone(g.children.get("write2"))
 
     def test_video_node_with_first_and_last_inputs(self):
         g = self.make("minimax_h3_fl2va")
@@ -770,6 +788,19 @@ class NukeNodes(WithFakeComfy):
         self.assertEqual(g["inputs_info"].value(),
                          "img1  ->  slot(s) 1-1;  vid1  ->  video slot(s) 1-1")
         self.assertFalse(g["video_first"].enabled())
+        self.assertEqual(g["video_range"].value(), "input's own range")
+        self.assertEqual(g["video_info"].value(), "vid1: frames 1001-1072 (72)")
+        g["video_range"].setValue("input's range, capped to output length")
+        nuke.fire_knob_changed(g, "video_range")           # 2 s x 24 fps = 48
+        self.assertEqual(g["video_info"].value(), "vid1: frames 1001-1048 (48)")
+        g["duration"].setValue(1)
+        nuke.fire_knob_changed(g, "duration")
+        self.assertEqual(g["video_info"].value(), "vid1: frames 1001-1024 (24)")
+        g["duration"].setValue(10)                         # longer than the clip
+        nuke.fire_knob_changed(g, "duration")
+        self.assertEqual(g["video_info"].value(), "vid1: frames 1001-1072 (72)")
+        g["video_range"].setValue("input's own range")
+        g["duration"].setValue(2)
 
         g["generate"].execute()
         self.wait_idle(g)
@@ -838,6 +869,11 @@ class NukeNodes(WithFakeComfy):
         self.assertEqual(pipes(), [("img1", True), ("vid1", True),   # no dead pipe
                                    ("img2", False), ("vid2", False)])
         self.assertIs(g.input(1), b)                     # the video kept its feed
+        g.setInput(2, b)                                 # img2 again, fed by b
+        g.setInput(0, None)                              # pull img1: img2 -> img1,
+        self.assertEqual(pipes(), [("img1", True), ("vid1", True),  # video untouched
+                                   ("img2", False), ("vid2", False)])
+        self.assertIs(g.input(0), b)
         g.setInput(1, None)
         self.assertEqual(pipes(), [("img1", True), ("vid1", False), ("img2", False)])
 

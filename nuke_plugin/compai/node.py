@@ -174,6 +174,12 @@ def _add_video_chain(n, colorspace=""):
     _set_colorspace(w, colorspace)
 
 
+RANGE_INPUT = "input's own range"
+RANGE_CLAMPED = "input's range, capped to output length"
+RANGE_PROJECT = "project range"
+RANGE_CUSTOM = "custom"
+
+
 # The two kinds of pipe a node can have. Each kind grows on its own, so
 # they end up interleaved on the node (img1, vid1, img2 ...); the Input
 # node's name is what tells them apart, never its position.
@@ -207,12 +213,17 @@ def _connected(node, kind):
 
 
 def _sync_inputs(node, kind, limit):
-    """Keep exactly one free input of this kind after the highest connected
-    one, up to the workflow's limit, the way Merge does. A gap lower down
-    is left alone: generating just skips it."""
-    connected = _connected(node, kind)
-    want = min(limit, connected[-1][0] + 1 if connected else 1)
-    have = len(_pipes(node, kind))
+    """Keep this kind's connections packed into its first pipes with exactly
+    one free pipe after them, up to the workflow's limit, the way Merge
+    does. Pulling a middle input moves the later ones down a place."""
+    pipes = _pipes(node, kind)
+    feeds = [node.input(i) for _, i in pipes if node.input(i) is not None]
+    for slot, (_, index) in enumerate(pipes):
+        feed = feeds[slot] if slot < len(feeds) else None
+        if node.input(index) is not feed:
+            node.setInput(index, feed)
+    want = min(limit, len(feeds) + 1)
+    have = len(pipes)
     colorspace = node["png_colorspace"].value().strip()
     with node:
         for n in range(have + 1, want + 1):
@@ -297,19 +308,34 @@ def _size_knobs(wf):
     if wf.max_images or wf.max_videos:
         knobs.append(nuke.Text_Knob("inputs_info", "inputs", ""))
     if wf.max_videos:
-        rng = nuke.Enumeration_Knob("video_range", "video frames",
-                                    ["input range", "project range", "custom"])
-        rng.setTooltip("Which frames of each video input are sent.\n"
-                       "input range: each input's own first to last frame.\n"
-                       "project range: the script's frame range.\n"
-                       "custom: the two numbers alongside.\n"
-                       "Videos are sent as ProRes, scaled to the megapixel "
-                       "budget at their own aspect.")
+        modes = [RANGE_INPUT, RANGE_PROJECT, RANGE_CUSTOM]
+        if wf.spec.get("length"):
+            modes.insert(1, RANGE_CLAMPED)
+        rng = nuke.Enumeration_Knob("video_range", "video frames", modes)
+        rng.setTooltip(
+            "Which frames of each video input are rendered and sent. The "
+            "'sending' line below shows the result.\n\n"
+            "input's own range: the frame range of whatever is plugged in, "
+            "wherever that sits in time. A clip on frames 1-50 sends 1-50 "
+            "even in a 1001-1025 script; put a TimeOffset before the node "
+            "and it sends the same 50 frames from their new position.\n\n"
+            "input's range, capped to output length: the same, but no more "
+            "frames than the video being generated (duration x fps), "
+            "counted from the input's first frame.\n\n"
+            "project range: the script's frame range, read from the input "
+            "at those frames. If the clip doesn't exist there (frames 1-50 "
+            "in a 1001-1025 script) you send its held last frame over and "
+            "over; line it up with a TimeOffset first.\n\n"
+            "custom: the two frame numbers alongside, read from the input "
+            "at those frames.\n\n"
+            "Videos are sent as ProRes, scaled to the megapixel budget at "
+            "their own aspect.")
         first = nuke.Int_Knob("video_first", "")
         first.clearFlag(nuke.STARTLINE)
         last = nuke.Int_Knob("video_last", "")
         last.clearFlag(nuke.STARTLINE)
-        knobs += [rng, first, last]
+        knobs += [rng, first, last,
+                  nuke.Text_Knob("video_info", "sending", "")]
     return knobs
 
 
@@ -486,6 +512,10 @@ def on_knob_changed():
     if name in ("target_format", "megapixels", "match_input", "temp_inputs",
                 "video_range", "reformat_output", "inputChange", "showPanel"):
         _refresh(node)
+    elif node.knob("video_info") is not None:
+        wf = _workflow(node)           # duration / fps change what is sent
+        if wf is not None and name in (wf.spec.get("length") or {}).values():
+            _refresh(node)
     if name == "showPanel":
         jobs.release_stale_lock(node)
 
@@ -756,12 +786,31 @@ def _write_video(node, n, index, path, first, last, fps):
 
 
 def _video_range(node, index):
-    """(first, last) frames to send for the video input at index."""
+    """(first, last) frames to send for the video input at index. Frame
+    numbers are the ones the input is read at."""
     mode = node["video_range"].value()
-    if mode == "custom":
+    if mode == RANGE_CUSTOM:
         return int(node["video_first"].value()), int(node["video_last"].value())
-    source = nuke.root() if mode == "project range" else node.input(index)
-    return int(source.firstFrame()), int(source.lastFrame())
+    if mode == RANGE_PROJECT:
+        return int(nuke.root().firstFrame()), int(nuke.root().lastFrame())
+    source = node.input(index)
+    first, last = int(source.firstFrame()), int(source.lastFrame())
+    frames = _output_frames(node) if mode == RANGE_CLAMPED else None
+    if frames:
+        last = min(last, first + frames - 1)
+    return first, last
+
+
+def _output_frames(node):
+    """How many frames the node is set to generate (duration x fps), from
+    the knobs node.json names under "length". None if it doesn't say."""
+    wf = _workflow(node)
+    length = wf.spec.get("length") if wf is not None else None
+    if not length or node.knob(length["seconds"]) is None \
+            or node.knob(length["fps"]) is None:
+        return None
+    return max(1, int(round(node[length["seconds"]].value()
+                            * node[length["fps"]].value())))
 
 
 def _sync_all_inputs(node, wf):
@@ -792,9 +841,16 @@ def _do_refresh(node):
     if node.knob("instant_cleanup") is not None:
         node["instant_cleanup"].setEnabled(bool(node["temp_inputs"].value()))
     if node.knob("video_range") is not None:
-        custom = node["video_range"].value() == "custom"
+        custom = node["video_range"].value() == RANGE_CUSTOM
         node["video_first"].setEnabled(custom)
         node["video_last"].setEnabled(custom)
+        if node.knob("video_info") is not None:
+            lines = []
+            for n, index in _connected(node, VID):
+                first, last = _video_range(node, index)
+                lines.append("vid%d: frames %d-%d (%d)"
+                             % (n, first, last, max(0, last - first + 1)))
+            node["video_info"].setValue(";  ".join(lines) or "no video connected")
     wf = _workflow(node)
     images = _connected(node, IMG)
     if node.knob("match_input") is not None:

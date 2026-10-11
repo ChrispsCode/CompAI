@@ -35,23 +35,27 @@ Every node works the same way; only the block of model settings under the prompt
 
 | Node | Takes images | Model settings |
 |---|---|---|
-| **Qwen Image** | no | *enhance prompt* (an LLM expands the prompt first; slower), *steps* |
-| **Qwen Image Edit** | 1–10 | *enhance prompt*, *steps* |
+| **Qwen Image** | no | *model*, *enhance prompt* (an LLM expands the prompt first; slower), *steps* |
+| **Qwen Image Edit** | 1–10 | *model*, *enhance prompt*, *steps* |
 | **Z-Image Turbo** | no | *model* (dropdown of the Z-Image models in ComfyUI), *steps* |
-| **Minimax_H3_fl2va** | *first* and/or *last* | *duration (s)*, *fps*, *steps*, *lightning LoRA*, *lightning steps*, *codec*. Makes a video |
+| **Minimax_H3_fl2va** | *first* and/or *last* | *model*, *video VAE*, *duration (s)*, *fps*, *steps*, *lightning LoRA*, *lightning steps*, *codec*. Makes a video |
 
-**Model dropdowns** are filled from ComfyUI when the node is created. Press **refresh** next to one after installing a model, or if ComfyUI wasn't running when you made the node.
+**Model dropdowns**: every node has a *model* dropdown for the diffusion model, listing the files of that model family installed in ComfyUI. This is where you pick between precisions (int8, bf16, fp16 …); higher precision is better quality and needs more VRAM and time. The video nodes also have *video VAE*, the model that decodes the result into pixels, which comes in precisions too. The dropdowns are filled from ComfyUI when the node is created. Press **refresh** next to one after installing a model, or if ComfyUI wasn't running when you made the node.
 
-**Nodes that take images:** the node starts with one input and grows a new free one each time you connect the last, like Merge, up to what the workflow accepts. Unconnected inputs are skipped and the rest are numbered in order, so you can write *"put the jacket from image 2 on the person in image 1"*. By default the format follows the first input. Each input is grabbed at the **current frame**, scaled to fill the generation size and cropped; it is never stretched. An input that is already the right size is sent untouched, so a Qwen Image result fed into Qwen Image Edit at the same megapixels comes back at exactly the same resolution with no resizing anywhere.
+**Nodes that take images:** the node starts with one input and grows a new free one each time you connect the last, like Merge, up to what the workflow accepts. Pull an input out of the middle and the later ones move down a pipe to close the gap, so the pipes always match the image numbers, so you can write *"put the jacket from image 2 on the person in image 1"*. By default the format follows the first input. Each input is grabbed at the **current frame**, scaled to fill the generation size and cropped; it is never stretched. An input that is already the right size is sent untouched, so a Qwen Image result fed into Qwen Image Edit at the same megapixels comes back at exactly the same resolution with no resizing anywhere.
 
-| **Minimax_H3_ref2va** | 0–9 reference images, 0–3 reference videos | *duration (s)*, *fps*, *reference size*, *steps*, *lightning LoRA*, *lightning steps*. Makes a video |
+| **Minimax_H3_ref2va** | 0–9 reference images, 0–3 reference videos | *model*, *video VAE*, *duration (s)*, *fps*, *reference size*, *steps*, *lightning LoRA*, *lightning steps*. Makes a video |
 
 **Video nodes** work the same way, with these differences:
 
 - On **Minimax_H3_fl2va** the inputs are named (*first*, *last*) and fixed. Connect either or both; at least one.
 - On **Minimax_H3_ref2va** the inputs are references, all optional, and they don't set the node's format. There are two kinds, each growing on its own as you connect them, so they end up interleaved on the node; go by the label on the pipe:
   - **img1, img2 …** (up to nine): reference images, grabbed at the current frame and sent at their own resolution.
-  - **vid1, vid2 …** (up to three): reference videos. Each is rendered out of Nuke as a ProRes movie, scaled to the megapixel budget, and uploaded. **video frames** chooses the range: each input's own range (default), the project range, or two numbers you type. Generate asks before sending more than 400 frames. Rendering the movie blocks Nuke until it's written.
+  - **vid1, vid2 …** (up to three): reference videos. Each is rendered out of Nuke as a ProRes movie, scaled to the megapixel budget, and uploaded. **video frames** chooses which frames, and the **sending** line under it shows exactly what will go. Generate asks before sending more than 400 frames. Rendering the movie blocks Nuke until it's written.
+    - *input's own range* (default): the frame range of whatever is plugged in, wherever it sits in time. A clip on 1–50 sends 1–50 even in a 1001–1025 script. Behind a TimeOffset of +1000 it sends 1001–1050: the same 50 frames.
+    - *input's range, capped to output length*: the same, but never more frames than the video being generated (duration × fps), counted from the input's first frame.
+    - *project range*: the script's range, read from the input at those frames. A clip on 1–50 read at 1001–1025 gives 25 copies of its held last frame, so line it up with a TimeOffset first.
+    - *custom*: the two frame numbers you type, read from the input at those frames.
 - The result is a movie file (`.mov` ProRes 422 by default), loaded into the node so that it **starts at the script's first frame** as it was when the result came back. Before and after the clip it holds.
 - **fps** follows the project's frame rate through an expression. The frame count is duration × fps, rounded up to the model's grid (5, 22, 39, 56 … frames), so 2 s gives 56 frames.
 - The movie has an audio track, which Nuke's Read ignores. Open the file elsewhere to hear it.
@@ -153,11 +157,11 @@ tests/                       offline tests, see §9
 
 | Installed workflow | Node | Images | Knobs | Models |
 |---|---|---|---|---|
-| `qwen_t2i` | Qwen Image | – | enhance, steps | Qwen Image 2.1 + Qwen3-VL encoder + Qwen 3.5 prompt enhancer |
-| `qwen_edit` | Qwen Image Edit | 1–10 | enhance, steps | same, i2i enhancer |
-| `minimax_h3_ref2va` | Minimax_H3_ref2va | 0–9 reference images (`min` 0, sent unresized, don't drive the format) and 0–3 reference videos | duration, fps (→ `root.fps`), ref_size, steps, lightning, lightning_steps | MiniMax H3 ref2va + the same VAEs and encoder + 4-step turbo LoRA. Output is ComfyUI's stock Save Video (`.mp4`, H.264). `workflow.json` has three groups of edits vs Harry's export, listed in its `node.json` notes |
+| `qwen_t2i` | Qwen Image | – | model, enhance, steps | Qwen Image 2.1 + Qwen3-VL encoder + Qwen 3.5 prompt enhancer |
+| `qwen_edit` | Qwen Image Edit | 1–10 | model, enhance, steps | same, i2i enhancer |
+| `minimax_h3_ref2va` | Minimax_H3_ref2va | 0–9 reference images (`min` 0, sent unresized, don't drive the format) and 0–3 reference videos | model, video_vae, duration, fps (→ `root.fps`), ref_size, steps, lightning, lightning_steps | MiniMax H3 ref2va + the same VAEs and encoder + 4-step turbo LoRA. Output is ComfyUI's stock Save Video (`.mp4`, H.264). `workflow.json` has three groups of edits vs Harry's export, listed in its `node.json` notes |
 | `z_image_turbo_t2i` | Z-Image Turbo | – | model (server list, `z_image`), steps | Z-Image Turbo, `qwen_3_4b` encoder, `ae` VAE |
-| `minimax_h3_fl2va` | Minimax_H3_fl2va | first, last (named, each optional) | duration, fps (→ `root.fps`), steps, lightning, lightning_steps, codec | MiniMax H3 fl2va + video and audio VAEs + Qwen3-VL 32B encoder + turbo LoRA. Output is ProRes/H.264 with audio. `workflow.json` has four edits vs Harry's export, listed in its `node.json` notes |
+| `minimax_h3_fl2va` | Minimax_H3_fl2va | first, last (named, each optional) | model, video_vae, duration, fps (→ `root.fps`), steps, lightning, lightning_steps, codec | MiniMax H3 fl2va + video and audio VAEs + Qwen3-VL 32B encoder + turbo LoRA. Output is ProRes/H.264 with audio. `workflow.json` has four edits vs Harry's export, listed in its `node.json` notes |
 
 **Layering rule:** anything that doesn't need Nuke stays in the nuke-free modules so it can be tested from a shell. `node.py` and `jobs.py` handle knobs, node graph and threading only.
 
@@ -200,6 +204,7 @@ tests/                       offline tests, see §9
 | `images` | **Either** `{"inputs": [{"name": "first", "title": "nuke_first_frame"}, …]}` for fixed, named inputs, each with its own Load Image node and each optional (an unused one is pruned with its links); **or** `{"max": N}`, which lets the node take up to N images, growing as they're connected (at most the number of `nuke_input_N` slots in the export; `scaffold` sets it to that). Connected inputs fill `nuke_input_1…` in order and unused slots are pruned. Optional `"prefix"` |
 | `images` extras | `"min"`: images a run needs (default 1; 0 makes them all optional). `"match_format"`: whether *match first input's format* starts ticked (default true; false when inputs are references, not the frame). `"resize"`: false sends inputs at their own size instead of the megapixel budget (for references the model node sizes itself) |
 | `videos` | `{"max": N}` gives the node up to N video inputs, fed into stock **Load Video** nodes titled `nuke_video_1…N` in order, unused ones pruned. Optional `"min"` (default 0) and `"prefix"` |
+| `length` | `{"seconds": "duration", "fps": "fps"}`: which two knobs set the output's length. Enables the *capped to output length* video-range mode |
 | `knobs` | The workflow's own block, in display order |
 
 Knob fields:
@@ -235,6 +240,8 @@ Known quirk: in `qwen_edit`, **Batch Images (feeding the prompt enhancer) is onl
 
 `CLAUDE.md` has the procedure. In short: `check` the export (reject it if flawed, never patch around it), `scaffold` it into `nuke_plugin/workflows/<name>/`, edit the drafted `node.json` down to what an artist needs, `check` again, run the tests, create the node in headless Nuke, update the table in §3.
 
+**Every workflow gets a `model` knob** bound to its diffusion-model loader (title it `nuke_load_diffusion_model`), `"options": "server"` with a `match` regex for the model family; a test enforces it. Add a dropdown for the VAE or text encoder too when the server has more than one precision of it.
+
 A new workflow should need **no Python**. If one does, the standard node lacks a capability (video output, masks, a second prompt…); design that as a general feature with Harry rather than special-casing a model.
 
 ## 6. Behaviour reference
@@ -267,12 +274,12 @@ A new workflow should need **no Python**. If one does, the standard node lacks a
 
 **Two kinds of pipe** (`node.IMG`, `node.VID`). A node can have image inputs, video inputs, or both, and each kind grows on its own, so their positions interleave (img1, vid1, img2 …). **Never assume an input's index from its slot number**: `_pipes(node, kind)` maps each slot `n` to its real index by reading the internal Input nodes' names and `number` knobs, and everything else goes through it.
 
-**Video inputs**: each is `vidN → vprepN (to box, fill) → vwriteN (mov, ProRes 4:2:2 10-bit, disabled except while executing)`. `_write_video` renders the chosen range on the main thread (`video_range`: the input's own `firstFrame()/lastFrame()`, the root's, or `video_first/last`), at the project fps, always scaled to the megapixel budget because every frame costs memory in Comfy. Videos are always uploaded (`/upload/image` takes any file); there is no path mode for them. More than `MAX_VIDEO_FRAMES` (400) asks first.
+**Video inputs**: each is `vidN → vprepN (to box, fill) → vwriteN (mov, ProRes 4:2:2 10-bit, disabled except while executing)`. `_write_video` renders the chosen range on the main thread. `_video_range` returns frame numbers *as the input is read*: the input node's own `firstFrame()/lastFrame()` (optionally capped to `_output_frames`, duration × fps from the knobs named by `length`), the root's range, or `video_first/last`. The `video_info` knob shows the result per input. The render is at the project fps, always scaled to the megapixel budget because every frame costs memory in Comfy. Videos are always uploaded (`/upload/image` takes any file); there is no path mode for them. More than `MAX_VIDEO_FRAMES` (400) asks first.
 
 **Image inputs**: each is `imgN → prepN (Reformat to box, fill) → writeN (png, 8 bit, rgb, disabled except while executing)`.
-- **Growing inputs:** `_sync_inputs` runs on the `inputChange` knobChanged event, once per kind, and keeps exactly one free input of that kind after the highest connected one, up to the workflow's limit, by adding or deleting chains inside the group. Deleting an Input that isn't the last one leaves a hole in the group's input numbers (a dead pipe), so `_compact_inputs` renumbers the rest 0..N-1 and reconnects each to what it had. Disconnecting a middle input changes nothing; disconnecting the top one shrinks back to just above the next connected input. `inputChange` fires in terminal mode too, and it does not fire destructively on script load (checked: a saved node reopens with its inputs and connections intact).
+- **Growing inputs:** `_sync_inputs` runs on the `inputChange` knobChanged event, once per kind. It first **packs** that kind's connections into its lowest pipes (pulling img2 moves img3's feed onto img2), then keeps exactly one free pipe after them, up to the workflow's limit, by adding or deleting chains inside the group. Deleting an Input that isn't the last one leaves a hole in the group's input numbers (a dead pipe), so `_compact_inputs` renumbers the rest 0..N-1 and reconnects each to what it had. All of this calls `setInput` from inside the callback, under the `_IN_REFRESH` guard. `inputChange` fires in terminal mode too, and a saved node reopens with its inputs and connections intact. Named inputs (first, last) are never packed or grown.
 - **Temporary inputs:** with `temp_inputs` on, the PNGs go to a fresh `tempfile.mkdtemp(prefix="compai_")` folder. On Harry's machine that is under `/tmp`, a RAM-backed tmpfs emptied on reboot and swept of files older than 10 days, so nothing is permanent. With `instant_cleanup` also on, `jobs._worker` deletes the folder when the run ends (done, failed or cancelled), before the result is reported. The sidecar records the paths either way. A node that has `temp_inputs` but no `instant_cleanup` knob (made on 2026-10-11 before the second knob existed) cleans up instantly, as it did then.
-- **Packing:** connected inputs are packed into slots 1..k.
+- **Packing:** pipes are kept packed, so pipe n is slot n; `on_generate` still numbers slots by counting connected pipes, which also covers a node that hasn't resynced yet.
 - **Ref sizing:** each ref is sized to the megapixel budget at its *own* aspect.
 - **Target format:** "match first input's format" copies the first connected input's format onto `target_format`.
 - **Recursion guard:** `_IN_REFRESH` stops `knobChanged` from recursing when code sets knobs.

@@ -32,7 +32,7 @@
     },
     "class_type": "VAELoader",
     "_meta": {
-      "title": "Load VAE"
+      "title": "nuke_load_video_vae"
     }
   },
   "120": {
@@ -154,7 +154,7 @@
     },
     "class_type": "UNETLoader",
     "_meta": {
-      "title": "Load Diffusion Model"
+      "title": "nuke_load_diffusion_model"
     }
   },
   "128": {

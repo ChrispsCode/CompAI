@@ -8,21 +8,54 @@
     "2. Added Load Image nodes 147-153 titled nuke_input_3..9, wired to ref_images.ref_image_2..8 on nuke_ref_to_video (the node accepts up to 9 reference images; the export had 2).",
     "3. Added PrimitiveFloat node 154 titled nuke_fps (24), wired to fps on Create Video (130) and to values.b on the Math Expression (131), whose expression now uses 'a * b' where it had 'a * 24'.",
     "4. Harry then re-exported from that file (2026-10-11) adding Load Video nodes 155/157/159 (nuke_video_1..3), each through a Get Video Components node into ref_videos.ref_video_0..2. That export is installed unedited.",
+    "5. Load Diffusion Model (127) titled nuke_load_diffusion_model and the video Load VAE (119) titled nuke_load_video_vae, for the model and video VAE dropdowns.",
     "Left alone, for Harry to decide: BasicScheduler (124) takes its model straight from Load Diffusion Model (127), not from the LoRA switch (141) as the first/last-frame workflow does."
   ],
   "output": "nuke_save_video",
   "out_name": "video",
   "timeout": 3600,
-  "size": {"multiple": 32, "megapixels": 0.4, "megapixels_range": [0.2, 1.2]},
+  "length": {
+    "seconds": "duration",
+    "fps": "fps"
+  },
+  "size": {
+    "multiple": 32,
+    "megapixels": 0.4,
+    "megapixels_range": [0.2, 1.2]
+  },
   "bind": {
     "prompt": [["nuke_prompt", "value"]],
     "seed": [["nuke_random_noise", "noise_seed"]],
     "width": [["nuke_ref_to_video", "width"]],
     "height": [["nuke_ref_to_video", "height"]]
   },
-  "images": {"max": 9, "min": 0, "match_format": false, "resize": false},
-  "videos": {"max": 3},
+  "images": {
+    "max": 9,
+    "min": 0,
+    "match_format": false,
+    "resize": false
+  },
+  "videos": {
+    "max": 3
+  },
   "knobs": [
+    {
+      "name": "model",
+      "type": "choice",
+      "options": "server",
+      "match": "minimax_h3_ref2va",
+      "tooltip": "Diffusion model file: the MiniMax H3 reference-to-video models installed in ComfyUI. Variants differ in precision (int8, bf16, fp16 ...): higher precision is better quality but needs more VRAM and time.",
+      "bind": [["nuke_load_diffusion_model", "unet_name"]]
+    },
+    {
+      "name": "video_vae",
+      "label": "video VAE",
+      "type": "choice",
+      "options": "server",
+      "match": "minimax_h3_video_vae",
+      "tooltip": "The model that turns the result into pixels (and encodes the inputs). Variants differ in precision: fp16 is higher quality than int8 and needs more VRAM.",
+      "bind": [["nuke_load_video_vae", "vae_name"]]
+    },
     {
       "name": "duration",
       "label": "duration (s)",

@@ -74,7 +74,7 @@
     },
     "class_type": "VAELoader",
     "_meta": {
-      "title": "Load VAE"
+      "title": "nuke_load_video_vae"
     }
   },
   "105_24": {
