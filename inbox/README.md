@@ -13,6 +13,7 @@ Drop a ComfyUI export in this folder and ask Claude to "ingest the inbox". It ge
    | `nuke_latent` | the Empty Latent node | generation width and height |
    | `nuke_ksampler` | the sampler | seed, and steps etc. if you want them as knobs |
    | `nuke_save` (or `nuke_save_anything`) | the one node that saves the final image | where Nuke picks up the result |
+   | `nuke_aspect` | a String primitive feeding a String Format, for models whose prompt starts with the aspect ratio (`Aspect ratio: 16:9`) | filled with the ratio nearest the Nuke format |
    | `nuke_input_1`, `nuke_input_2`, … | stock Load Image nodes, numbered with no gaps | a variable number of images from Nuke |
    | `nuke_first_frame`, `nuke_last_frame`, … | stock Load Image nodes with a name instead of a number | fixed, named inputs on the Nuke node (first / last), each optional |
    | `nuke_video_1`, `nuke_video_2`, … | stock Load Video nodes, numbered with no gaps | video inputs on the Nuke node (vid1, vid2 …), written out from Nuke as movies |

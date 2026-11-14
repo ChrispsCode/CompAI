@@ -11,7 +11,9 @@ node.json keys (see README "Workflow definitions" for the full reference):
     label, node_name, tile_color   how the Nuke node is presented
     output                         title of the save node
     bind                           standard values -> [[title, input], ...]
-                                   (prompt, seed, width, height)
+                                   (prompt, seed, width, height, aspect)
+    aspect_ratios                  ["1:1", "4:3", ...]: the ratios a bound
+                                   "aspect" is snapped to
     set                            constants: [[title, input, value], ...]
     images                         {"max": N} for numbered nuke_input_N slots,
                                    or {"inputs": [{name, title}, ...]} for
@@ -29,6 +31,7 @@ node.json keys (see README "Workflow definitions" for the full reference):
 
 import copy
 import json
+import math
 import os
 import random
 import re
@@ -39,7 +42,9 @@ from .comfy_client import ComfyError
 WORKFLOWS_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "workflows")
 
-STANDARD = ("prompt", "seed", "width", "height")
+STANDARD = ("prompt", "seed", "width", "height", "aspect")
+TEXT_VALUES = ("prompt", "aspect")         # standard values sent as strings
+ASPECT_RE = re.compile(r"^(\d+):(\d+)$")
 KNOB_TYPES = ("int", "float", "bool", "string", "choice")
 TITLE_PREFIX = "nuke_"
 SAVE_PREFIX = "nuke_save"
@@ -74,6 +79,7 @@ class Workflow(object):
     bind = property(lambda self: self.spec.get("bind", {}))
     knobs = property(lambda self: self.spec.get("knobs", []))
     constants = property(lambda self: self.spec.get("set", []))
+    aspect_ratios = property(lambda self: self.spec.get("aspect_ratios", []))
 
     @property
     def image_inputs(self):
@@ -288,6 +294,17 @@ def validate(wf):
             check_target("bind.%s" % name, title, key)
     if ("width" in wf.bind) != ("height" in wf.bind):
         problems.append("bind: width and height must be bound together.")
+    if "aspect" in wf.bind:
+        ratios = wf.aspect_ratios
+        if not (isinstance(ratios, list) and ratios and all(
+                isinstance(r, str) and ASPECT_RE.match(r)
+                and "0" not in ASPECT_RE.match(r).groups() for r in ratios)):
+            problems.append("bind.aspect needs \"aspect_ratios\": the ratios "
+                            "the model knows, as \"W:H\" strings, e.g. "
+                            "[\"1:1\", \"4:3\", \"16:9\"].")
+        if "width" not in wf.bind:
+            problems.append("bind.aspect: width and height must be bound too; "
+                            "the aspect is worked out from them.")
     for title, key, _value in wf.constants:
         check_target("set", title, key)
 
@@ -468,21 +485,46 @@ def server_class(wf, knob):
 # Patching and running
 # --------------------------------------------------------------------------
 
+def nearest_aspect(width, height, ratios):
+    """The ratio in ratios ("W:H" strings) closest to width x height.
+    Closeness is measured on a log scale, so 2:1 and 1:2 are equally far
+    from 1:1; a tie goes to the first in the list."""
+    target = math.log(float(width) / float(height))
+
+    def distance(ratio):
+        w, h = ASPECT_RE.match(ratio).groups()
+        return abs(math.log(float(w) / float(h)) - target)
+    return min(ratios, key=distance)
+
+
+def with_aspect(wf, values):
+    """values plus "aspect", if the workflow binds it and it isn't given:
+    the workflow's ratio nearest to the width and height being sent."""
+    if "aspect" not in wf.bind or values.get("aspect") is not None \
+            or not values.get("width") or not values.get("height"):
+        return values
+    return dict(values, aspect=nearest_aspect(values["width"], values["height"],
+                                              wf.aspect_ratios))
+
+
 def build(wf, values, images=None, image_mode="upload", filename_prefix=None,
           videos=None):
     """A patched copy of the workflow graph, ready to submit.
 
-    values holds the standard values (prompt, seed, width, height) and the
-    workflow's own knobs by name; anything missing keeps the export's value.
+    values holds the standard values (prompt, seed, width, height, and
+    aspect, which is worked out from width and height when not given) and
+    the workflow's own knobs by name; anything missing keeps the export's
+    value.
     images are upload names or absolute paths: in slot order for numbered
     slots, or one per named input (None = not supplied) for named ones.
     videos are upload names in slot order. Unused image and video nodes
     are pruned along with their links."""
     graph = copy.deepcopy(wf.graph)
+    values = with_aspect(wf, values)
     for name, targets in wf.bind.items():
         if values.get(name) is None:
             continue
-        value = values[name] if name == "prompt" else int(values[name])
+        value = values[name] if name in TEXT_VALUES else int(values[name])
         for title, key in targets:
             comfy_client.set_input(graph, title, key, value)
     for knob in wf.knobs:
@@ -558,7 +600,7 @@ def generate(name, values, out_path, images=None,
     client = comfy_client.ComfyClient(host)
     client.ping()
 
-    values = dict(values)
+    values = with_aspect(wf, dict(values))
     if "seed" in wf.bind and values.get("seed") is None:
         values["seed"] = random.randint(0, 2**32 - 1)
     info = dict(values, workflow=name)
@@ -609,7 +651,7 @@ def generate(name, values, out_path, images=None,
 def scaffold(graph, info=None):
     """A first-draft node.json for an export, from its nuke_* titles.
 
-    Standard values are bound by convention (nuke_prompt, any '...seed'
+    Standard values are bound by convention (nuke_prompt, nuke_aspect, any '...seed'
     input, a nuke_* node with width and height, nuke_save*, and LoadImage
     nodes: numbered nuke_input_N, or named ones by their title). Every other literal input on a
     nuke_* node becomes a candidate knob: prune these by hand, a node should
@@ -643,6 +685,8 @@ def scaffold(graph, info=None):
                 continue
             if title == "nuke_prompt" and key in ("value", "text"):
                 spec["bind"].setdefault("prompt", []).append([title, key])
+            elif title == "nuke_aspect" and key in ("value", "text"):
+                spec["bind"].setdefault("aspect", []).append([title, key])
             elif key in ("width", "height") and [title, key] in spec["bind"].get(key, []):
                 continue
             elif key.endswith("seed"):

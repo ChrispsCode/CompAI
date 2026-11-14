@@ -197,6 +197,48 @@ class Patching(unittest.TestCase):
         with self.assertRaises(cc.ComfyError):
             workflows.build(workflows.load("qwen_t2i"), dict(prompt="p"), ["/a"])
 
+    def aspect_workflow(self, **spec_changes):
+        """z_image with a nuke_aspect string primitive bound to "aspect"."""
+        wf = workflows.load("z_image_turbo_t2i")
+        graph = copy.deepcopy(wf.graph)
+        graph["999"] = {"class_type": "PrimitiveString", "inputs": {"value": "1:1"},
+                        "_meta": {"title": "nuke_aspect"}}
+        spec = copy.deepcopy(wf.spec)
+        spec["bind"]["aspect"] = [["nuke_aspect", "value"]]
+        spec["aspect_ratios"] = ["1:1", "4:3", "3:4", "3:2", "2:3", "16:9", "9:16"]
+        spec.update(spec_changes)
+        return workflows.Workflow("aspect_test", spec, graph)
+
+    def test_nearest_aspect(self):
+        ratios = ["1:1", "4:3", "3:4", "3:2", "2:3", "16:9", "9:16"]
+        for (w, h), want in {(2368, 1760): "4:3", (1760, 2368): "3:4",
+                             (2912, 2912): "1:1", (3872, 2176): "16:9",
+                             (3552, 2368): "3:2", (2048, 858): "16:9",   # 2.39:1
+                             (1024, 1088): "1:1"}.items():
+            self.assertEqual(workflows.nearest_aspect(w, h, ratios), want, (w, h))
+        self.assertEqual(workflows.nearest_aspect(10, 10, ["4:3", "3:4"]), "4:3")  # tie
+
+    def test_aspect_follows_the_generation_size(self):
+        wf = self.aspect_workflow()
+        self.assertEqual(workflows.validate(wf), [])
+        g = workflows.build(wf, dict(prompt="p", width=2368, height=1760))
+        self.assertEqual(titled(g, "nuke_aspect")["inputs"]["value"], "4:3")
+        g = workflows.build(wf, dict(prompt="p", width=1536, height=2720))
+        self.assertEqual(titled(g, "nuke_aspect")["inputs"]["value"], "9:16")
+        g = workflows.build(wf, dict(prompt="p", width=2368, height=1760, aspect="1:1"))
+        self.assertEqual(titled(g, "nuke_aspect")["inputs"]["value"], "1:1")  # given wins
+        g = workflows.build(wf, dict(prompt="p"))
+        self.assertEqual(titled(g, "nuke_aspect")["inputs"]["value"], "1:1")  # no size: export's
+
+    def test_aspect_needs_ratios_and_a_size(self):
+        for ratios in (None, [], ["4x3"], ["0:1"], "16:9"):
+            problems = workflows.validate(self.aspect_workflow(aspect_ratios=ratios))
+            self.assertTrue(any("aspect_ratios" in p for p in problems), ratios)
+        wf = self.aspect_workflow()
+        del wf.spec["bind"]["width"], wf.spec["bind"]["height"]
+        self.assertTrue(any("width and height must be bound too" in p
+                            for p in workflows.validate(wf)))
+
     def test_choice_options(self):
         wf = workflows.load("z_image_turbo_t2i")
         knob = wf.knobs[0]

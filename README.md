@@ -197,7 +197,8 @@ tests/                       offline tests, see §9
 | `node_name` | Nuke node name stem (`ZImageTurbo1`) |
 | `tile_color` | Hex RGBA string |
 | `output` | Title of the save node. Its `filename_prefix` is set and its images are read back |
-| `bind` | Where the **standard** values go: `prompt`, `seed`, `width`, `height`. Each is a list of `[title, input]`, so one value can feed several nodes (Qwen sends the seed to the sampler and the prompt enhancer). All optional; an unbound value is simply not sent |
+| `bind` | Where the **standard** values go: `prompt`, `seed`, `width`, `height`, `aspect`. Each is a list of `[title, input]`, so one value can feed several nodes (Qwen sends the seed to the sampler and the prompt enhancer). All optional; an unbound value is simply not sent |
+| `aspect_ratios` | Needed when `aspect` is bound: the ratios the model knows, e.g. `["1:1", "4:3", "16:9"]`. At Generate, `aspect` is the one nearest the width and height being sent (on a log scale, ties to the first listed), sent as a string such as `"16:9"` and recorded in the sidecar. It never changes the generation size: a 2.39 format is still generated at 2.39 and only described as `16:9`. For models whose prompt or prompt upsampler wants the aspect ratio as text (P-H3-Image): bind it to a String primitive titled `nuke_aspect` that feeds a `StringFormat` |
 | `set` | Constants applied on every run: `[[title, input, value], …]`. Qwen Edit uses it to switch the size source to the Empty Latent, since Nuke always supplies a size |
 | `out_name` | Optional default for the node's *name* knob |
 | `timeout` | Seconds to wait for a run before giving up. Default 900; the video workflow uses 3600. It becomes the default of the node's *timeout (min)* knob, which is what a run actually uses |
@@ -247,6 +248,8 @@ Known quirk: in `qwen_edit`, **Batch Images (feeding the prompt enhancer) is onl
 A new workflow should need **no Python**. If one does, the standard node lacks a capability (video output, masks, a second prompt…); design that as a general feature with Harry rather than special-casing a model.
 
 ## 6. Behaviour reference
+
+**Aspect (`workflows.with_aspect`)**: for a workflow that binds `aspect`, `generate` and `build` add the `aspect_ratios` entry nearest the width and height being sent, unless one was given. Nothing in Nuke changes; the node's size logic is untouched.
 
 **Sizing (`comfy_client.generation_size`)**: keep the format's aspect, use a pixel budget of `megapixels × 1024²`, and snap each side to a multiple of 16. Anamorphic formats are squared up with `width × pixelAspect`. A size that is already on the 16 grid and within one snapping step of the budget is returned unchanged, which makes the function a fixed point on its own output: that is what lets a generated image go back in without resampling.
 
