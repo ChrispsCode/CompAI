@@ -1,0 +1,46 @@
+{
+  "label": "P-H3-Image",
+  "node_name": "PH3Image",
+  "tile_color": "0x9334E9FF",
+  "notes": [
+    "workflow.json is the source of truth from here on (Harry continues from it). Source: the ComfyUI gallery template image_p_h3_t2i (Pruna AI's P-H3-Image, free, local), fetched with comfy-mcp on 2026-11-15 and converted to API format by comfy-cli (`comfy run --print-prompt`). It is the LoRA route: the P-H3 LoRA on the MiniMax H3 fl2va video model, with Pruna's own text encoder, VAE and prompt upsampler.",
+    "Retitles: Save Image (16) -> nuke_save; Text (Prompt) (29:24) -> nuke_prompt; Load Diffusion Model (29:1) -> nuke_load_diffusion_model; If/Else Switch (29:23) -> nuke_enhance_switch; RandomNoise (29:12) -> nuke_random_noise; p-h3-image Conditioning (29:9) -> nuke_conditioning.",
+    "Aspect wiring, agreed with Harry on 2026-11-15 and copied from Pruna's own p-h3-image_text_to_image.json: the template typed 'Aspect ratio: 4:3\\nRequest: ...' into the prompt primitive. That line now comes from a new StringFormat (29:40, 'Aspect ratio: {b}\\nRequest: {a}') fed by nuke_prompt and a new PrimitiveString nuke_aspect (29:41), which Nuke fills with the nearest of aspect_ratios to the generation size. StringFormat feeds the upsampler (Generate Text, 29:33) only; with the upsampler off, the model gets the bare request, as in Pruna's workflow (the template sent it the aspect line too). nuke_prompt's default is now the bare request.",
+    "Width and height are bound on nuke_conditioning, replacing the links from the Resolution Selector (32), which is left orphaned.",
+    "The upsampler decodes greedily (sampling_mode off), so the seed only drives the image; the same request always gives the same expanded prompt.",
+    "The template samples with er_sde; Pruna's model card and own workflow use euler. Left as the template has it.",
+    "Claude generated with it from the CLI on 2026-11-15 (8 MP, 3872x2176, upsampler on, 48.2 s with models cold): the wiring runs, nuke_aspect was sent as 16:9, the upsampler expanded the request, and the sign text came out right. Harry generated from the Nuke GUI with the upsampler off on 2026-11-15: the bare-request path works."
+  ],
+  "output": "nuke_save",
+  "timeout": 1800,
+  "size": {
+    "multiple": 32,
+    "megapixels": 8,
+    "megapixels_range": [1, 16]
+  },
+  "aspect_ratios": ["1:1", "4:3", "3:4", "3:2", "2:3", "16:9", "9:16"],
+  "bind": {
+    "prompt": [["nuke_prompt", "value"]],
+    "seed": [["nuke_random_noise", "noise_seed"]],
+    "width": [["nuke_conditioning", "width"]],
+    "height": [["nuke_conditioning", "height"]],
+    "aspect": [["nuke_aspect", "value"]]
+  },
+  "knobs": [
+    {
+      "name": "model",
+      "type": "choice",
+      "options": "server",
+      "match": "minimax_h3_fl2va",
+      "tooltip": "The MiniMax H3 base model the P-H3-Image LoRA is applied to (the first/last-frame video model). Variants differ in precision: higher is better quality but needs more VRAM and time.",
+      "bind": [["nuke_load_diffusion_model", "unet_name"]]
+    },
+    {
+      "name": "enhance",
+      "label": "enhance prompt",
+      "type": "bool",
+      "tooltip": "Expand the request into a full scene description with Pruna's prompt upsampler before generating; the model renders full, specific prompts much better than short requests. The aspect ratio nearest the format is passed to it automatically. The expanded text appears in 'used prompt'.",
+      "bind": [["nuke_enhance_switch", "switch"]]
+    }
+  ]
+}

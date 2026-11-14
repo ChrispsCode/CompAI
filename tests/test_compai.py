@@ -399,6 +399,17 @@ class Running(WithFakeComfy):
         self.assertEqual(titled(self.submitted(), "nuke_ksampler")["inputs"]["seed"],
                          r["seed"])
 
+    def test_p_h3_aspect_reaches_the_upsampler_and_the_sidecar(self):
+        r = self.run_wf("p_h3_image_t2i", values=dict(
+            prompt="a ramen shop", seed=5, width=3872, height=2176))
+        g = self.submitted()
+        self.assertEqual(titled(g, "nuke_aspect")["inputs"]["value"], "16:9")
+        self.assertEqual(r["aspect"], "16:9")
+        fmt = g[g[cc.find_node(g, "Upsampler input")]["inputs"]["values.b"][0]]
+        self.assertEqual(fmt["_meta"]["title"], "nuke_aspect")
+        switch = titled(g, "nuke_enhance_switch")["inputs"]
+        self.assertEqual(g[switch["on_false"][0]]["_meta"]["title"], "nuke_prompt")
+
     def test_used_prompt_read_back(self):
         self.assertEqual(self.run_wf("qwen_t2i")["used_prompt"],
                          "the prompt that was used")
@@ -485,7 +496,7 @@ class NukeNodes(WithFakeComfy):
         importlib.reload(menu)
         commands = nuke.menu("Nodes").commands
         self.assertEqual(sorted(commands),
-                         ["Minimax_H3_Image", "Minimax_H3_fl2va", "Minimax_H3_ref2va",
+                         ["Minimax_H3_Image", "Minimax_H3_fl2va", "Minimax_H3_ref2va", "P-H3-Image",
                           "Qwen Image",
                           "Qwen Image Edit", "Z-Image Turbo"])
         nuke.menu("Nodes").run("Z-Image Turbo")
