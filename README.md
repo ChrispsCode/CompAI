@@ -84,6 +84,7 @@ Export it from ComfyUI and drop it in `inbox/`. See [inbox/README.md](inbox/READ
 
 - **"ComfyUI not reachable"**: Comfy isn't running, or the host is wrong (*Settings* tab).
 - **"Workflow '…' is not usable"**: the installed workflow fails its checks. Run `python3 workflow.py check <name>` for the reasons.
+- **A model file is in the dropdown but fails to load**: the dropdown lists files by name; it can't tell whether ComfyUI can read one. Files quantised for another runtime (Apple MLX, GGUF without a loader node) are listed and then fail.
 - **A model dropdown only shows one entry**: ComfyUI wasn't reachable when the node was made (press **refresh**), or only one matching model is installed.
 - **Generate is greyed out with nothing running**: close and reopen the node's panel.
 - **Colours look off**: set **PNG colorspace** on the *Settings* tab to your OCIO config's sRGB name.
@@ -219,7 +220,7 @@ Knob fields:
 | `range` | `[min, max]` for a `float` slider |
 | `expression` | For a `float`: a Nuke expression the knob is created with, e.g. `"root.fps"`. The evaluated value is what gets sent |
 | `options` | For `choice`: a list, or `"server"` to ask ComfyUI for the bound input's combo list (model files, samplers…) |
-| `match` | For `"options": "server"`: a regex; only matching entries are offered. Use it on model lists, which hold every model of that kind |
+| `match` | For `"options": "server"`: a regex; only matching entries are offered. Use it on model lists, which hold every model of that kind. Matching ignores case and treats `-` and `_` as the same, so write it with underscores |
 
 **Rules for exports** (what `lint_graph` enforces; the user-facing version is `inbox/README.md`):
 

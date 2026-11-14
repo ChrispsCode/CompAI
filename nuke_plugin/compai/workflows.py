@@ -445,9 +445,17 @@ def choice_options(wf, knob, info=None):
         found = combo_options(_input_specs((info or {}).get(cls, {})).get(key))
         pattern = knob.get("match")
         options = [o for o in found or []
-                   if not pattern or re.search(pattern, str(o))]
+                   if not pattern or _name_matches(pattern, str(o))]
     options = [str(o) for o in options]
     return options if default in options else [default] + options
+
+
+def _name_matches(pattern, name):
+    """Whether a file name belongs to the family a "match" regex describes.
+    Case and the choice of - or _ don't count: repackaged models are named
+    qwen-image-2.1-... as often as qwen_image_2.1_..."""
+    return bool(re.search(pattern, name, re.I)
+                or re.search(pattern, name.replace("-", "_"), re.I))
 
 
 def server_class(wf, knob):

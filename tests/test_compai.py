@@ -205,6 +205,10 @@ class Patching(unittest.TestCase):
         self.assertEqual(
             workflows.choice_options(wf, knob, {"UNETLoader": UNET_INFO}),
             [default, "z_image_base.safetensors"])       # "match" filters qwen
+        renamed = {"UNETLoader": {"input": {"required": {"unet_name": [
+            ["Z-Image-Turbo-FP16.safetensors", "qwen-image-2.1.safetensors"], {}]}}}}
+        self.assertEqual(workflows.choice_options(wf, knob, renamed),
+                         [default, "Z-Image-Turbo-FP16.safetensors"])   # - vs _, case
         new_shape = {"UNETLoader": {"input": {"required": {"unet_name": [
             "COMBO", {"options": ["z_image_x.safetensors"]}]}}}}
         self.assertEqual(workflows.choice_options(wf, knob, new_shape),
