@@ -443,7 +443,8 @@ class NukeNodes(WithFakeComfy):
         importlib.reload(menu)
         commands = nuke.menu("Nodes").commands
         self.assertEqual(sorted(commands),
-                         ["Minimax_H3_fl2va", "Minimax_H3_ref2va", "Qwen Image",
+                         ["Minimax_H3_Image", "Minimax_H3_fl2va", "Minimax_H3_ref2va",
+                          "Qwen Image",
                           "Qwen Image Edit", "Z-Image Turbo"])
         nuke.menu("Nodes").run("Z-Image Turbo")
         self.assertIn("ZImageTurbo1", [n.name() for n in nuke.allNodes()])

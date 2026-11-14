@@ -1,0 +1,56 @@
+{
+  "label": "Minimax_H3_Image",
+  "node_name": "MiniMaxImage",
+  "tile_color": "0xC9822EFF",
+  "notes": [
+    "workflow.json is the source of truth from here on (Harry continues from it). Source: the ComfyUI gallery template image_minimax_h3_image_t2i (free, local), fetched with comfy-mcp on 2026-11-14 and converted to API format by comfy-cli (`comfy run --print-prompt`), not by ComfyUI's own Save (API). Subgraph nodes are flattened to IDs like 23:1.",
+    "Claude's edits to the converted template, all retitles: Save Image (9) -> nuke_save; Text (user_prompt) (23:24) -> nuke_prompt; KSampler (23:7) -> nuke_ksampler; Generate Text (23:15) -> nuke_generate_text; If/Else Switch (23:22) -> nuke_enhance_switch; Load Diffusion Model (23:1) -> nuke_load_diffusion_model; Load CLIP 32B (23:2) -> nuke_load_text_encoder; MiniMax H3 Image Conditioning (23:5) -> nuke_conditioning.",
+    "Width and height are bound on nuke_conditioning, which replaces the links from the Resolution Selector (14), leaving it orphaned and unexecuted (same as the MiniMax video nodes).",
+    "Harry generated with it in the Nuke GUI on 2026-11-14, prompt enhancer on: the conversion and the retitles work end to end."
+  ],
+  "output": "nuke_save",
+  "timeout": 1800,
+  "size": {
+    "multiple": 32,
+    "megapixels": 4,
+    "megapixels_range": [1, 16]
+  },
+  "bind": {
+    "prompt": [["nuke_prompt", "value"]],
+    "seed": [["nuke_ksampler", "seed"], ["nuke_generate_text", "sampling_mode.seed"]],
+    "width": [["nuke_conditioning", "width"]],
+    "height": [["nuke_conditioning", "height"]]
+  },
+  "knobs": [
+    {
+      "name": "model",
+      "type": "choice",
+      "options": "server",
+      "match": "minimax_h3_image",
+      "tooltip": "Diffusion model file: the MiniMax H3 Image models installed in ComfyUI. Variants differ in precision (int8, bf16, w4a8 ...): higher precision is better quality but needs more VRAM and time.",
+      "bind": [["nuke_load_diffusion_model", "unet_name"]]
+    },
+    {
+      "name": "text_encoder",
+      "label": "text encoder",
+      "type": "choice",
+      "options": "server",
+      "match": "qwen3vl_32b_minimax_h3",
+      "tooltip": "The Qwen3-VL 32B model that reads the prompt. int8 is the template's choice; nvfp4 is smaller (the one the MiniMax video nodes use) and may cost some prompt accuracy.",
+      "bind": [["nuke_load_text_encoder", "clip_name"]]
+    },
+    {
+      "name": "enhance",
+      "label": "enhance prompt",
+      "type": "bool",
+      "tooltip": "Expand the prompt into a detailed caption with the Qwen 3.5 LLM before generating (the model reads detailed captions best). Slower; the expanded text appears in 'used prompt'.",
+      "bind": [["nuke_enhance_switch", "switch"]]
+    },
+    {
+      "name": "steps",
+      "type": "int",
+      "tooltip": "Sampling steps. The model is distilled for 6.",
+      "bind": [["nuke_ksampler", "steps"]]
+    }
+  ]
+}
