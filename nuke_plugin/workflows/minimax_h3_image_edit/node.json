@@ -1,0 +1,61 @@
+{
+  "label": "Minimax_H3_Image_Edit",
+  "node_name": "MiniMaxImageEdit",
+  "tile_color": "0xA8692AFF",
+  "notes": [
+    "workflow.json is the source of truth from here on (Harry continues from it). Source: the ComfyUI gallery template image_minimax_h3_image_edit (free, local), fetched with comfy-mcp on 2026-11-15 and converted to API format by comfy-cli (`comfy run --print-prompt`). Same checkpoint, encoder, VAE and prompt expander as minimax_h3_image_t2i.",
+    "Retitles: Save Image (9) -> nuke_save; Text (user_prompt) (43) -> nuke_prompt; KSampler (38) -> nuke_ksampler; Generate Text (34) -> nuke_generate_text; Boolean (Enable PE?) (61) -> nuke_enhance; Load Diffusion Model (29) -> nuke_load_diffusion_model; Load CLIP 32B (30) -> nuke_load_text_encoder; MiniMax H3 Image Conditioning (32) -> nuke_conditioning; Load Image (45) -> nuke_input_1.",
+    "Added Load Image nodes 102-116 titled nuke_input_2 ... nuke_input_16 (MiniMax's model card: up to 16 reference images), each wired to images.image_N on nuke_conditioning and images.imageN on nuke_generate_text, as the template's own note says to add more. Nuke prunes the ones not plugged in.",
+    "nuke_input_1 is wired straight into both nodes too (agreed with Harry on 2026-11-15). The template sent it through Resize to exactly 4 MP (56), Resize to a multiple of 32 (48, which floors and centre-crops), Get Image Size (50) and Compare Images (62); all four are deleted. With the output size bound to Nuke's, that chain made the reference a different shape from the output (2752x1536 became 2720x1504, about 1% cropped off y), so every edit came back about 2% taller, compounding when results were fed back in. Nuke already sends img1 at exactly the generation size on the 32 grid, which the conditioning node passes through unchanged.",
+    "Width and height are bound on nuke_conditioning, so the output size follows the Nuke format (by default the first input's). In workflow.json they are 0, the node's 'use image_1's size'.",
+    "Harry generated with one and with two input images from the Nuke GUI on 2026-11-15, before the rewiring of nuke_input_1 (those showed the stretch), and again after it: chained edits now keep their proportions."
+  ],
+  "output": "nuke_save",
+  "timeout": 1800,
+  "size": {
+    "multiple": 32,
+    "megapixels": 4,
+    "megapixels_range": [1, 16]
+  },
+  "images": {
+    "max": 16
+  },
+  "bind": {
+    "prompt": [["nuke_prompt", "value"]],
+    "seed": [["nuke_ksampler", "seed"], ["nuke_generate_text", "sampling_mode.seed"]],
+    "width": [["nuke_conditioning", "width"]],
+    "height": [["nuke_conditioning", "height"]]
+  },
+  "knobs": [
+    {
+      "name": "model",
+      "type": "choice",
+      "options": "server",
+      "match": "minimax_h3_image",
+      "tooltip": "Diffusion model file: the MiniMax H3 Image models installed in ComfyUI. Variants differ in precision (int8, bf16, w4a8 ...): higher precision is better quality but needs more VRAM and time.",
+      "bind": [["nuke_load_diffusion_model", "unet_name"]]
+    },
+    {
+      "name": "text_encoder",
+      "label": "text encoder",
+      "type": "choice",
+      "options": "server",
+      "match": "qwen3vl_32b_minimax_h3",
+      "tooltip": "The Qwen3-VL 32B model that reads the prompt and the input images. int8 is the template's choice; nvfp4 is smaller and may cost some accuracy.",
+      "bind": [["nuke_load_text_encoder", "clip_name"]]
+    },
+    {
+      "name": "enhance",
+      "label": "enhance prompt",
+      "type": "bool",
+      "tooltip": "Expand the edit instruction into a detailed one with the Qwen 3.5 LLM, which also looks at the input images. Slower; the expanded text appears in 'used prompt'. Refer to inputs as <Picture 1> (img1, the image being edited), <Picture 2> ...",
+      "bind": [["nuke_enhance", "value"]]
+    },
+    {
+      "name": "steps",
+      "type": "int",
+      "tooltip": "Sampling steps. The model is distilled for 6.",
+      "bind": [["nuke_ksampler", "steps"]]
+    }
+  ]
+}

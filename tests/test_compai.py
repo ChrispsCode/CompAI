@@ -140,6 +140,34 @@ class Patching(unittest.TestCase):
                 self.assertIs(titled(g, "nuke_size_switch")["inputs"]["switch"],
                               True)
 
+    def test_minimax_edit_sends_only_the_images_plugged_in(self):
+        wf = workflows.load("minimax_h3_image_edit")
+        self.assertEqual(wf.max_images, 16)
+        for n in (1, 3, 16):
+            imgs = ["in%d.png" % i for i in range(1, n + 1)]
+            g = workflows.build(wf, dict(prompt="p", width=2368, height=1760), imgs)
+            self.assertEqual(dangling(g), [])
+            self.assertEqual(len(cc.image_slots(g)), n)
+            cond = titled(g, "nuke_conditioning")["inputs"]
+            text = titled(g, "nuke_generate_text")["inputs"]
+            self.assertEqual(sorted(k for k in cond if k.startswith("images.")),
+                             sorted("images.image_%d" % i for i in range(1, n + 1)))
+            self.assertEqual(sorted(k for k in text if k.startswith("images.")),
+                             sorted("images.image%d" % i for i in range(1, n + 1)))
+            for i in range(1, n + 1):    # image N reaches both nodes from slot N
+                slot = cc.find_node(g, "nuke_input_%d" % i)
+                self.assertEqual(cond["images.image_%d" % i], [slot, 0])
+                self.assertEqual(text["images.image%d" % i], [slot, 0])
+                self.assertEqual(g[slot]["inputs"]["image"], imgs[i - 1])
+            # Nuke sizes img1; nothing in Comfy may rescale or crop it, or the
+            # reference and the output differ in shape (the 2%-taller bug)
+            self.assertEqual([v["class_type"] for v in g.values() if v["class_type"] in
+                              ("ResizeImageMaskNode", "ImageScaleToTotalPixels",
+                               "ImageScale", "GetImageSize")], [])
+            self.assertEqual((cond["width"], cond["height"]), (2368, 1760))
+        with self.assertRaises(cc.ComfyError):
+            workflows.build(wf, dict(prompt="p"), [])         # an edit needs img1
+
     def test_named_inputs_are_each_optional(self):
         wf = workflows.load("minimax_h3_fl2va")
         values = dict(prompt="p", seed=4, width=864, height=480, duration=3)
@@ -496,7 +524,7 @@ class NukeNodes(WithFakeComfy):
         importlib.reload(menu)
         commands = nuke.menu("Nodes").commands
         self.assertEqual(sorted(commands),
-                         ["Minimax_H3_Image", "Minimax_H3_fl2va", "Minimax_H3_ref2va", "P-H3-Image",
+                         ["Minimax_H3_Image", "Minimax_H3_Image_Edit", "Minimax_H3_fl2va", "Minimax_H3_ref2va", "P-H3-Image",
                           "Qwen Image",
                           "Qwen Image Edit", "Z-Image Turbo"])
         nuke.menu("Nodes").run("Z-Image Turbo")
