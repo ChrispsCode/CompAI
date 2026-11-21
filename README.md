@@ -62,6 +62,23 @@ Every node works the same way; only the block of model settings under the prompt
 - Megapixels defaults much lower (0.4), because every frame costs memory.
 - It is slow. The node gives up after **timeout (min)** on the *Settings* tab: an hour by default here, 15 minutes on the stills nodes. Raise it before starting a long run; it can't be changed for a job already running.
 
+## Editing part of a plate: CompAI Crop and Uncrop
+
+Two utility nodes under **Comfy › Utility**, for sending just the area you're working on and putting the result back exactly where it came from:
+
+```
+plate ─► CompAI Crop ─► image node (e.g. Qwen Image Edit) ─► CompAI Uncrop ─► Merge (over) ◄─ plate
+```
+
+- **CompAI Crop** works like Crop, except the box it cuts is always a size the model takes as it is.
+  - **for model** picks the workflow it feeds, which sets the **grid** (both sides must be multiples of it). **guess** picks it from the first CompAI node below. **refresh** rescans installed workflows. **manual** shows a **grid** knob to set yourself.
+  - Draw the **area** in the viewer. The **crop box** is that area resized about its centre to the grid: **snap** *grow* (default) rounds each side up, so nothing you framed is lost; *nearest* and *shrink* round to the nearest or down. **keep inside image** slides it back in if snapping pushed it over an edge.
+  - It never scales. To send the area at a different resolution, put a Transform above the crop.
+  - The **output** line shows the size and megapixels, and warns when that's outside the model's range.
+- **CompAI Uncrop** puts the result back on the plate's format at the crop's position, pixel for pixel, ready to merge over the plate. Make it with **Create Uncrop** on the crop (it is linked to the crop, and placed below the CompAI node the crop feeds), or from the menu with the image node selected (it links to the first CompAI Crop above). Moving the crop moves the uncrop.
+  - **solid alpha** (on) gives the box an alpha of 1, so it covers the plate. **feather** softens the box's edges inwards.
+  - A result that isn't the crop's size is scaled to fit the box; the **result** line says so.
+
 ## Where things go
 
 Each run writes versioned files to the output dir:
@@ -139,6 +156,7 @@ inbox/                       Harry drops new ComfyUI exports here
 nuke_plugin/                 everything Nuke loads; this folder goes on the plugin path
   menu.py                    builds the Comfy menu from the installed workflows
   compai/                    the Python package
+    utility/                 utility nodes that aren't workflows (CompAI Crop / Uncrop)
   workflows/<name>/          one folder per installed workflow
     workflow.json            the Save (API) export, unedited
     node.json                the definition: knobs and bindings
@@ -155,6 +173,8 @@ tests/                       offline tests, see §9
 | `cli.py` | no | The commands behind `workflow.py` |
 | `node.py` | yes | Builds the Nuke node: standard knobs, the workflow's knob block, image inputs, `on_generate` |
 | `jobs.py` | yes | Background job runner: thread, status, cancel, loading the result |
+| `utility/grid.py` | no | CompAI Crop's snapping rule (`snap_box`), its starting box, the workflows it can target and its info lines |
+| `utility/crop.py` | yes | The CompAI Crop and Uncrop nodes. Entry points in `__init__`: `create_crop`, `create_uncrop`, `on_crop_changed`, `on_crop_guess`, `on_crop_refresh`, `on_crop_make_uncrop`, `on_uncrop_changed` |
 
 | Installed workflow | Node | Images | Knobs | Models |
 |---|---|---|---|---|
@@ -298,6 +318,11 @@ A new workflow should need **no Python**. If one does, the standard node lacks a
 
 **Output dir**: `_output_dir` falls back to `~/comfy_nuke` only when the evaluated path is empty or not absolute, or when it's the `root.name` default in an unsaved script.
 
+**CompAI Crop / Uncrop (`utility/crop.py`)**: all geometry is knob expressions, so a saved script renders without compai and stays right on undo and when the plate changes. Python only fills the model list, sets `multiple` from the workflow's `size.multiple`, and writes the info lines.
+- *Crop:* `crop_w/h` and `crop_x/y` on the group are expressions on the drawn `box`, `multiple`, `snap` (read as its index: never reorder `grid.SNAP_MODES`) and `keep_inside`; they mirror `grid.snap_box`. The plate size is read as `this.Input1.width`, the group's own Input node, because `input.width` logs "Nothing is named input" when nothing is connected. Inside: `CutOut` Crop (`reformat` on, `crop` off) with its box on those knobs.
+- *Uncrop:* `x y w h plate_w plate_h` are expressions on the crop's knobs (`ShotCrop.crop_x`); a rename of the crop carries them. Inside: `Fit` (Reformat to w×h, distort, disabled when the result is already w×h) → `Alpha` → `ToPlate` (Reformat to the plate size, resize none, centre off: the image stays at 0,0) → `Place` (Position: whole-pixel move, no filtering) → `Edge` (Crop to the box, softness = feather, black outside) → Output.
+- Targets are workflows that take images or videos (`grid.targets`), reference workflows included: their inputs go unresized but the output is on the grid. A workflow without `size.multiple` gets 16.
+
 ## 7. Nuke API notes learned the hard way
 
 - `node.setName(name)` has **no** `uncollisionable` argument. Setting a taken name gets uniquified automatically.
@@ -331,6 +356,7 @@ A new workflow should need **no Python**. If one does, the standard node lacks a
 | Growing inputs (1 → 10) on Qwen Image Edit | ✅ headless Nuke 15.2: grow, middle gap, shrink, stop at 10, save and reopen, write from an added input. ⚠️ not yet tried in the GUI (adding/deleting Input nodes from a callback while dragging a pipe), and no generation with more than 4 images has been run |
 | All three workflows vs live Comfy `/object_info` | ✅ node classes, input names and model files all present (ComfyUI 0.38.1) |
 | All three nodes in real Nuke 15.2, headless, no generation | ✅ creation, knobs and defaults, model dropdown filled from live Comfy, refresh, format link, "match input", writing an input PNG, loading a result, save and reopen |
+| CompAI Crop / Uncrop | ✅ headless Nuke 15.2 and 17.1 on a 4K plate whose pixels hold their own coordinates: crop → uncrop is exact on every sampled pixel, including after moving the crop, renaming it, and save and reopen; the crop expressions agree with `grid.snap_box` on 300 random boxes, grids and modes; guess, Create Uncrop placement and linking, menu-made uncrop, a scaled result fitted back, feather. ⚠️ GUI untested: the area handles in the viewer, the panel layout, the grid knob as a slider |
 | Patching, checks, client flow, nodes end to end | ✅ offline only, against a fake Comfy server and a fake `nuke` module. Proves our own logic, not the real APIs |
 | `upload_image` against live Comfy | ✅ implied by Harry's Qwen Edit run (the path loader isn't installed, so it uploaded) |
 | `NukeLoadImagePath` custom node | ⚠️ untested and not installed on Harry's Comfy |

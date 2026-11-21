@@ -135,7 +135,9 @@ class Enumeration_Knob(Knob):
         self._items = list(items)
 
     def setValue(self, v):
-        if v in self._items:           # like real Nuke: unknown is ignored
+        # Like real Nuke: unknown is ignored, and an OCIO v2 entry
+        # ("name\tFamily/path...") is set by its name alone.
+        if v in self._items or v in [i.split("\t")[0] for i in self._items]:
             self._value = v
 
 
@@ -276,16 +278,24 @@ class Node(object):
         self.end()
 
 
+class Group(Node):
+    pass
+
+
+_GROUPS = ("Group",)
+
+
 class _Nodes(object):
     def __getattr__(self, cls):
-        return lambda **kw: Node(cls, kw.get("name"), kw.get("inputs"))
+        kind = Group if cls in _GROUPS else Node
+        return lambda **kw: kind(cls, kw.get("name"), kw.get("inputs"))
 
 
 nodes = _Nodes()
 
 
 def createNode(cls, inpanel=True):
-    return Node(cls)
+    return (Group if cls in _GROUPS else Node)(cls)
 
 
 def delete(node):

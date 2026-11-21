@@ -5,6 +5,7 @@ Runs AI image generation from Nuke nodes. Local models go through ComfyUI (built
 ## Layout
 
 - `nuke_plugin/` is on Harry's Nuke plugin path. `compai/` is the Python package, `workflows/<name>/` holds one installed workflow each (`workflow.json` export + `node.json` definition).
+- `nuke_plugin/compai/utility/` holds utility nodes that aren't workflows (CompAI Crop / Uncrop).
 - `inbox/` is where Harry drops new ComfyUI exports.
 - `workflow.py` is the CLI: `check`, `scaffold`, `list`, `run`.
 - `tests/` are offline tests with a fake `nuke` module and a fake Comfy server.

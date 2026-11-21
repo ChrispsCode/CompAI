@@ -11,6 +11,7 @@ modules (comfy_client, workflows, cli) can be used from a plain shell.
     cli            command line: check / scaffold / list / run
     node           builds the Nuke node for a workflow       (imports nuke)
     jobs           background job runner behind Generate     (imports nuke)
+    utility        CompAI Crop / Uncrop                      (crop imports nuke)
 """
 
 
@@ -55,12 +56,50 @@ def on_create_read(n):
     node.on_create_read(n)
 
 
+# CompAI Crop / Uncrop (utility/crop.py)
+
+def create_crop():
+    from .utility import crop
+    return crop.create_crop()
+
+
+def create_uncrop():
+    from .utility import crop
+    return crop.create_uncrop()
+
+
+def on_crop_changed():
+    from .utility import crop
+    crop.on_crop_changed()
+
+
+def on_crop_guess(n):
+    from .utility import crop
+    crop.on_crop_guess(n)
+
+
+def on_crop_refresh(n):
+    from .utility import crop
+    crop.on_crop_refresh(n)
+
+
+def on_crop_make_uncrop(n):
+    from .utility import crop
+    return crop.on_crop_make_uncrop(n)
+
+
+def on_uncrop_changed():
+    from .utility import crop
+    crop.on_uncrop_changed()
+
+
 def reload():
     """Pick up code changes without restarting Nuke. Existing nodes use the
     new code straight away; nodes are only rebuilt by creating them again."""
     import importlib
     import sys
-    for name in ("comfy_client", "workflows", "jobs", "node"):
+    for name in ("comfy_client", "workflows", "jobs", "node",
+                 "utility.grid", "utility.crop"):
         module = sys.modules.get(__name__ + "." + name)
         if module is not None:
             importlib.reload(module)

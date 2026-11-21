@@ -24,6 +24,7 @@ sys.path[:0] = [os.path.join(HERE, "nuke_stub"), PLUGIN, HERE]
 import nuke                      # the stub
 import compai
 from compai import cli, comfy_client as cc, jobs, workflows
+from compai.utility import grid
 from fake_comfy import FakeComfy, IMAGE_BYTES
 
 UNET_INFO = {"input": {"required": {"unet_name": [
@@ -497,6 +498,97 @@ class Running(WithFakeComfy):
         self.assertEqual(cli.main(["list"]), 0)
 
 
+class CropGrid(unittest.TestCase):
+    """The snapping rule behind CompAI Crop. The node does the same with knob
+    expressions; a headless Nuke test checks the two agree."""
+
+    def test_snap_side(self):
+        self.assertEqual(grid.snap_side(748, 32, "grow"), 768)
+        self.assertEqual(grid.snap_side(748, 32, "nearest"), 736)
+        self.assertEqual(grid.snap_side(748, 32, "shrink"), 736)
+        self.assertEqual(grid.snap_side(752, 32, "nearest"), 768)   # half up
+        for mode in grid.SNAP_MODES:
+            self.assertEqual(grid.snap_side(800, 32, mode), 800)     # already on it
+            self.assertEqual(grid.snap_side(3, 32, mode), 32)        # never zero
+
+    def test_snap_box_keeps_centre_then_fits_inside(self):
+        # Harry's 748 x 612 crop of a 4K plate
+        self.assertEqual(grid.snap_box((2308, 876, 3056, 1488), 32),
+                         (2298, 862, 768, 640))
+        # a box already on the grid is left exactly where it is
+        self.assertEqual(grid.snap_box((2298, 862, 3066, 1502), 32),
+                         (2298, 862, 768, 640))
+        # grown past the right edge: slid back in, or not if bounds aren't given
+        self.assertEqual(grid.snap_box((4000, 0, 4090, 90), 32, "grow", (4096, 2160)),
+                         (3997, 0, 96, 96))
+        self.assertEqual(grid.snap_box((4050, 0, 4096, 90), 32, "grow", (4096, 2160)),
+                         (4032, 0, 64, 96))
+        self.assertEqual(grid.snap_box((4050, 0, 4096, 90), 32),
+                         (4041, -3, 64, 96))
+        # bigger than the image: left centred rather than clamped
+        self.assertEqual(grid.snap_box((0, 0, 5000, 100), 32, "grow", (4096, 2160))[0],
+                         -12)
+
+    def test_default_box_centred_at_model_budget(self):
+        x, y, r, t = grid.default_box(4096, 2160, 32, 1.0)
+        self.assertEqual((r - x) % 32, 0)
+        self.assertEqual((t - y) % 32, 0)
+        self.assertAlmostEqual((r - x) * (t - y) / 1024.0 ** 2, 1.0, delta=0.1)
+        self.assertEqual((x + r) // 2, 2048)
+        self.assertEqual(grid.default_box(300, 200, 32, 1.0), (6, 4, 294, 196))
+
+    def test_targets_are_workflows_with_a_grid(self):
+        names = [wf.name for wf in grid.targets()]
+        self.assertIn("qwen_edit", names)
+        self.assertIn("minimax_h3_image_edit", names)
+        self.assertNotIn("qwen_t2i", names)               # no images
+        self.assertIn("minimax_h3_fl2va", names)          # video
+        self.assertIn("minimax_h3_ref2va", names)         # output on its grid
+
+    def test_describe_warns_outside_the_model_range(self):
+        wf = workflows.load("qwen_edit")
+        out, model = grid.describe(800, 640, wf)
+        self.assertEqual(out, "800 \u00d7 640 px \u00b7 0.49 MP")
+        self.assertIn("Qwen Image Edit", model)
+        out, _ = grid.describe(256, 256, wf)
+        self.assertIn("outside", out)
+        out, model = grid.describe(800, 640, None, 50)
+        self.assertEqual(model, "manual \u00b7 50 px grid")
+
+
+class Colorspace(unittest.TestCase):
+    """_set_colorspace against the menu entries real configs give."""
+
+    # Copied from a Write in Nuke 17.1 with the ACES 1.3 / OCIO v2.4 config.
+    OCIO_V2 = [
+        "default",
+        "texture_paint\ttexture_paint (sRGB Encoded Rec.709 (sRGB))",
+        "ACEScg\tColorspaces/ACES/ACEScg\t\tace_acescg,lin_ap1",
+        "sRGB Encoded Rec.709 (sRGB)\tColorspaces/Utility/sRGB Encoded "
+        "Rec.709 (sRGB)\t\tsrgb_encoded_rec709_srgb,Utility - sRGB - "
+        "Texture,srgb_texture,sRGB - Texture,srgb_tx",
+    ]
+
+    def pick(self, items, preferred=""):
+        from compai import node
+        n = type("N", (), {})()
+        knob = nuke.Enumeration_Knob("colorspace", "", items)
+        n.knobs = lambda: {"colorspace": knob}
+        node._set_colorspace(n, preferred)
+        return knob.value()
+
+    def test_ocio_v2_entries(self):
+        self.assertEqual(self.pick(self.OCIO_V2), "sRGB Encoded Rec.709 (sRGB)")
+
+    def test_preferred_by_alias(self):
+        self.assertEqual(self.pick(self.OCIO_V2, "lin_ap1"), "ACEScg")
+
+    def test_plain_and_path_entries(self):
+        self.assertEqual(self.pick(["linear", "sRGB"]), "sRGB")
+        self.assertEqual(self.pick(["default", "Output/Output - sRGB"]),
+                         "Output/Output - sRGB")
+
+
 class NukeNodes(WithFakeComfy):
     def setUp(self):
         WithFakeComfy.setUp(self)
@@ -526,7 +618,8 @@ class NukeNodes(WithFakeComfy):
         self.assertEqual(sorted(commands),
                          ["Minimax_H3_Image", "Minimax_H3_Image_Edit", "Minimax_H3_fl2va", "Minimax_H3_ref2va", "P-H3-Image",
                           "Qwen Image",
-                          "Qwen Image Edit", "Z-Image Turbo"])
+                          "Qwen Image Edit", "Utility/CompAI Crop",
+                          "Utility/CompAI Uncrop", "Z-Image Turbo"])
         nuke.menu("Nodes").run("Z-Image Turbo")
         self.assertIn("ZImageTurbo1", [n.name() for n in nuke.allNodes()])
 

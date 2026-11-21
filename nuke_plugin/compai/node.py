@@ -55,6 +55,10 @@ def add_menu():
         # "/" in a command name makes a submenu, so keep it out of labels
         menu.addCommand(label.replace("/", "-"),
                         "import compai; compai.create(%r)" % name)
+    # utility nodes, not workflows ("/" makes the submenu)
+    menu.addCommand("Utility/CompAI Crop", "import compai; compai.create_crop()")
+    menu.addCommand("Utility/CompAI Uncrop",
+                    "import compai; compai.create_uncrop()")
 
 
 def create(name):
@@ -65,6 +69,7 @@ def create(name):
         return None
 
     g = nuke.createNode("Group", inpanel=False)
+    assert isinstance(g, nuke.Group)
     g.setName(wf.node_name + "1")
     if wf.spec.get("tile_color"):
         g["tile_color"].setValue(int(wf.spec["tile_color"], 16))
@@ -903,11 +908,22 @@ def _set_colorspace(n, preferred):
     if knob is None:
         return None
     values = knob.values()
-    # values may be plain names or "Family/Name" paths depending on config
+    # Entries depend on the config: a plain name, a "Family/Name" path, or
+    # (OCIO v2, Nuke 16+) "name\tFamily/path\t\talias,alias", whose name is
+    # the first field and the only part setValue accepts.
+    def names(v):
+        fields = v.split("\t")
+        out = {fields[0], fields[0].split("/")[-1]}
+        if len(fields) > 1:
+            out.add(fields[1].split("/")[-1])
+        if len(fields) > 3:
+            out.update(a.strip() for a in fields[3].split(","))
+        return out
+
     def match(name):
         for v in values:
-            if v == name or v.split("/")[-1] == name:
-                return v
+            if name in names(v):
+                return v.split("\t")[0]
         return None
     for name in ([preferred] if preferred else []) + SRGB_CANDIDATES:
         v = match(name)
