@@ -14,6 +14,9 @@
     "height": [["nuke_latent", "height"]]
   },
   "set": [["nuke_size_switch", "switch", true]],
+  "size": {
+    "multiple": 32
+  },
   "images": {
     "max": 10
   },

@@ -55,8 +55,8 @@ LOADERS = ("LoadImage", "LoadVideo")       # nodes whose file Nuke supplies
 # Knob names a workflow can't use: the standard knobs every node gets, and
 # the ones Nuke puts on every node.
 RESERVED = set("""
-    prompt seed random_seed match_input target_format megapixels gen_size
-    reformat_output inputs_info video_range video_first video_last video_info
+    prompt seed random_seed size_mode target_format megapixels
+    input_fit gen_size reformat_output inputs_info video_range video_first video_last video_info
     output_dir out_name generate cancel reuse_seed status
     last_file last_seed used_prompt comfy_workflow host input_mode
     png_colorspace temp_inputs instant_cleanup refresh_choices create_read timeout

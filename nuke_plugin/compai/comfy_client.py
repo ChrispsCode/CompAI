@@ -139,6 +139,14 @@ def generation_size(target_w, target_h, megapixels=1.0, multiple=16):
     return snap(w), snap(h)
 
 
+def snap_size(width, height, multiple=16):
+    """An image's own size on the model's grid: each side rounded to the
+    nearest multiple (halves up), never below one step. A size already on
+    the grid comes back unchanged."""
+    snap = lambda v: max(1, int(math.floor(v / float(multiple) + 0.5))) * multiple
+    return snap(width), snap(height)
+
+
 # --------------------------------------------------------------------------
 # Server communication
 # --------------------------------------------------------------------------

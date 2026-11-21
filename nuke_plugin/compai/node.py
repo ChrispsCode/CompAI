@@ -1,20 +1,23 @@
 """
 node.py - builds the Nuke node for an installed workflow.
 
-Every node is a Group with the same standard parts: prompt, seed, target
-format and megapixels, output dir and versioning, Generate / Cancel, a
-Results tab, and an internal Read -> Reformat -> Output so the result flows
-downstream like a plate. Workflows that take images also get inputs that
-are written out as sRGB PNGs for Comfy.
+Every node is a Group with the same standard parts: prompt and seed, a size
+section, output dir and versioning, Generate / Cancel, a Results tab, and an
+internal Read -> Reformat -> Output so the result flows downstream like a
+plate. Workflows that take images also get inputs that are written out as
+sRGB PNGs for Comfy.
 
-Nothing is ever stretched. The result comes out at the size it was generated
-unless 'reformat result' is on, and anything that must change shape (an
-input going to Comfy, a result going to the format) is scaled to fill and
-cropped. An image already at the generation size passes through untouched.
+The size comes from the first input or the format, either at its own size
+or at its aspect scaled to a megapixel budget, always snapped to the model's
+grid. The first input is fitted to that size (crop, pad or stretch, the
+'input fit' knob); other inputs go at their own aspect. With 'resize result
+back' on, the result is resized to the first input or the format, undoing
+the fit, so it lines up with what went in. An image already at the size it
+is sent at passes through untouched.
 
-Between the prompt and the seed sits the workflow's own knob block, built
-from the "knobs" list in its node.json. Nothing in here is specific to one
-model: to add a model, add a workflow folder (see README).
+Between the prompt and seed and the size section sits the workflow's own
+knob block, built from the "knobs" list in its node.json. Nothing in here is
+specific to one model: to add a model, add a workflow folder (see README).
 """
 
 import os
@@ -36,6 +39,19 @@ CALL = "import compai; compai.%s(nuke.thisNode())"
 SRGB_CANDIDATES = ["sRGB", "Output - sRGB", "sRGB - Display",
                    "sRGB Encoded Rec.709 (sRGB)", "sRGB - Texture",
                    "Utility - sRGB - Texture", "srgb_tx"]
+
+# # Where the generation size comes from. Saved scripts store the text, so
+# # never rename these.
+SIZE_INPUT = "first input"
+SIZE_INPUT_MP = "first input at megapixels"
+SIZE_FORMAT = "format"
+SIZE_FORMAT_MP = "format at megapixels"
+# # How the first input is made the generation's shape, the Reformat resize
+# # that does it, and the one that undoes it on the result.
+FIT_MODES = ("crop", "pad", "stretch")
+_FIT_RESIZE = {"crop": "fill", "pad": "fit", "stretch": "distort"}
+_UNFIT_RESIZE = {"crop": "fit", "pad": "fill", "stretch": "distort"}
+WARN_COLOR = "#e8a33d"
 
 
 # --------------------------------------------------------------------------
@@ -88,8 +104,8 @@ def create(name):
 
     knobs = [nuke.Tab_Knob("comfy", "Comfy")]
     knobs += _prompt_knobs(wf)
-    knobs += _workflow_knobs(wf, _server_info(wf, DEFAULT_HOST))
     knobs += _seed_knobs()
+    knobs += _workflow_knobs(wf, _server_info(wf, DEFAULT_HOST))
     knobs += _size_knobs(wf)
     knobs += _output_knobs(wf)
     knobs += _action_knobs()
@@ -275,41 +291,84 @@ def _prompt_knobs(wf):
 def _seed_knobs():
     seed = nuke.Int_Knob("seed", "seed")
     seed.setValue(1)
+    seed.setFlag(nuke.STARTLINE)
     rand = nuke.Boolean_Knob("random_seed", "new seed each run")
     rand.setValue(True)
     rand.clearFlag(nuke.STARTLINE)
-    return [nuke.Text_Knob("div_seed", ""), seed, rand]
+    return [seed, rand]
 
 
 def _size_knobs(wf):
-    knobs = []
-    if wf.max_images:
-        match = nuke.Boolean_Knob("match_input", "match first input's format")
-        match.setValue(wf.match_format)
-        match.setFlag(nuke.STARTLINE)
-        knobs.append(match)
+    takes_inputs = bool(wf.max_images or wf.max_videos)
+    modes = [SIZE_FORMAT, SIZE_FORMAT_MP]
+    if takes_inputs:
+        modes = [SIZE_INPUT, SIZE_INPUT_MP] + modes
+    follow = bool(wf.max_images and wf.match_format)
+    clip = bool(wf.spec.get("length"))     # the workflow makes a video
+    mode = nuke.Enumeration_Knob("size_mode", "size", modes)
+    # # An edit is made at its input's own size, to go back over it. A video
+    # # model takes far fewer pixels than a plate has, so a clip scales.
+    if not follow:
+        mode.setValue(SIZE_FORMAT_MP)
+    else:
+        mode.setValue(SIZE_INPUT_MP if clip else SIZE_INPUT)
+    mode.setTooltip(
+        "Where the generation size comes from. Both sides are always "
+        "snapped to multiples of %d, the model's grid.\n\n"
+        "first input: the first input's own size. Feed it from a CompAI "
+        "Crop and it is used exactly, with nothing resampled.\n\n"
+        "first input at megapixels: the first input's aspect, scaled to "
+        "the megapixels below.\n\n"
+        "format: the format's own size.\n\n"
+        "format at megapixels: the format's aspect, scaled to the "
+        "megapixels below.\n\n"
+        "With no input connected, the first input modes use the format."
+        % wf.multiple if takes_inputs else
+        "Where the generation size comes from. Both sides are always "
+        "snapped to multiples of %d, the model's grid.\n\n"
+        "format: the format's own size.\n\n"
+        "format at megapixels: the format's aspect, scaled to the "
+        "megapixels below." % wf.multiple)
+    fmt = nuke.Format_Knob("target_format", "format")
+    fmt.setTooltip("The format the size comes from in the format modes. In "
+                   "the first input modes it shows the first input's format "
+                   "and can't be changed.")
     mp = nuke.Double_Knob("megapixels", "megapixels")
     mp.setRange(*wf.megapixels_range)
     mp.setValue(wf.megapixels)
-    mp.setTooltip("Generation budget. The image is generated at about this "
-                  "many megapixels, at the format's aspect, with both sides "
-                  "multiples of %d. A format that is already such a size at "
-                  "this budget is used exactly." % wf.multiple
-                  + (" Each input image is sent at this budget too, at its "
-                     "own aspect: scaled to fill and cropped, never stretched, "
-                     "and untouched if it is already the right size."
-                     if wf.max_images and wf.resize_inputs else "")
-                  + (" Input images are sent at their own size."
-                     if wf.max_images and not wf.resize_inputs else ""))
-    fmt = nuke.Format_Knob("target_format", "format")
-    fmt.setTooltip("Sets the aspect ratio of the generation. The pixel size "
-                   "comes from megapixels, unless 'reformat result' is on.")
-    reformat = nuke.Boolean_Knob("reformat_output", "reformat result to format")
-    reformat.setTooltip("Off: the result comes out raw, at the size it was "
-                        "generated.\nOn: it is resized to the format above "
-                        "(scaled to fill, then cropped).")
+    mp.setTooltip("Generation budget in the 'at megapixels' modes: the image "
+                  "is generated at about this many megapixels. The slider "
+                  "covers what %s is made for (%g-%g MP)."
+                  % (wf.label, wf.megapixels_range[0], wf.megapixels_range[1]))
+    knobs = [nuke.Text_Knob("div_size", ""), mode, fmt, mp]
+    if _fits_inputs(wf):
+        fit = nuke.Enumeration_Knob("input_fit", "input fit", list(FIT_MODES))
+        fit.setTooltip(
+            "How the first input is made the generation's shape. In the "
+            "first input modes that only takes up the rounding to the grid "
+            "(under half a grid step); in the format modes it can be a "
+            "real change of aspect.\n\n"
+            "crop: scale to fill and cut off the overflow. Nothing is "
+            "distorted, but a sliver at two edges isn't sent, and comes back "
+            "black with 'resize result back'.\n\n"
+            "pad: scale to fit and fill the rest with black. Everything is "
+            "sent; the model sees black bars, which are cut off again on the "
+            "way back.\n\n"
+            "stretch: squash to the shape. Everything is sent and comes back "
+            "exactly in place; the model sees it slightly distorted.\n\n"
+            "Other inputs go at their own aspect and get the same treatment "
+            "for their own rounding. An input already at the size it is "
+            "sent at is never resampled.")
+        knobs.append(fit)
+    reformat = nuke.Boolean_Knob("reformat_output", "resize result back")
+    reformat.setValue(follow and not clip)
+    reformat.setTooltip(
+        "On: the result is resized to the first input's size (first input "
+        "modes, undoing the input fit so it lines up with the input) or to "
+        "the format (format modes, scaled to fill and cropped).\n"
+        "Off: the result comes out raw, at the size it was generated.")
     reformat.setFlag(nuke.STARTLINE)
-    knobs += [fmt, mp, nuke.Text_Knob("gen_size", "generate at", ""), reformat]
+    knobs += [reformat, nuke.Text_Knob("gen_size", "generate at", "")]
     if wf.max_images or wf.max_videos:
         knobs.append(nuke.Text_Knob("inputs_info", "inputs", ""))
     if wf.max_videos:
@@ -333,8 +392,8 @@ def _size_knobs(wf):
             "over; line it up with a TimeOffset first.\n\n"
             "custom: the two frame numbers alongside, read from the input "
             "at those frames.\n\n"
-            "Videos are sent as ProRes, scaled to the megapixel budget at "
-            "their own aspect.")
+            "Videos are sent as ProRes, sized like image inputs (see "
+            "'input fit').")
         first = nuke.Int_Knob("video_first", "")
         first.clearFlag(nuke.STARTLINE)
         last = nuke.Int_Knob("video_last", "")
@@ -506,6 +565,10 @@ def on_knob_changed():
     name = knob.name()
     if _IN_REFRESH:            # ignore knobChanged fired by our own setValue
         return
+    try:
+        node.name()
+    except ValueError:         # closing a script fires inputChange on nodes
+        return                 # that are already gone (17.1)
     if name == "png_colorspace":
         with node:
             for n in nuke.allNodes("Write") + nuke.allNodes("Read"):
@@ -514,8 +577,9 @@ def on_knob_changed():
         wf = _workflow(node)           # None if gone: leave the inputs alone
         if wf is not None:
             _guarded(_sync_all_inputs, node, wf)
-    if name in ("target_format", "megapixels", "match_input", "temp_inputs",
-                "video_range", "reformat_output", "inputChange", "showPanel"):
+    if name in ("size_mode", "target_format", "megapixels", "input_fit",
+                "temp_inputs", "video_range", "reformat_output",
+                "inputChange", "showPanel"):
         _refresh(node)
     elif node.knob("video_info") is not None:
         wf = _workflow(node)           # duration / fps change what is sent
@@ -614,6 +678,13 @@ def on_generate(node):
         ranges.append((first, last))
 
     _refresh(node)
+    w, h = _generation_size(node)
+    top = wf.megapixels_range[1]
+    if w * h / 1024.0 ** 2 > top and not nuke.ask(
+            "This will generate at %d x %d (%.1f MP), above the %g MP %s is "
+            "made for. It may be very slow or run out of memory.\n\n"
+            "Generate anyway?" % (w, h, w * h / 1024.0 ** 2, top, wf.label)):
+        return
     if node["random_seed"].value():
         node["seed"].setValue(random.randint(0, 2**31 - 1))
     values["seed"] = int(node["seed"].value())
@@ -701,12 +772,46 @@ def _host(node):
     return node["host"].value().strip() or DEFAULT_HOST
 
 
+def _fits_inputs(wf):
+    """Whether the node resizes what it sends (and so has 'input fit').
+    Reference images go as they are; videos are always resized."""
+    return bool(wf.max_videos or (wf.max_images and wf.resize_inputs))
+
+
+def _follows_input(node):
+    return node["size_mode"].value() in (SIZE_INPUT, SIZE_INPUT_MP)
+
+
+def _uses_megapixels(node):
+    return node["size_mode"].value() in (SIZE_INPUT_MP, SIZE_FORMAT_MP)
+
+
+def _fit(node):
+    """The input fit; nodes that send nothing resized have no knob."""
+    knob = node.knob("input_fit")
+    return knob.value() if knob is not None else "crop"
+
+
+def _frame_input(node):
+    """Index of the first input: the first connected image, else the first
+    connected video. None if nothing is connected."""
+    for kind in (IMG, VID):
+        found = _connected(node, kind)
+        if found:
+            return found[0][1]
+    return None
+
+
 def _generation_size(node):
+    """(w, h) to generate at, from target_format (which _refresh keeps on
+    the first input in the first input modes)."""
     f = node["target_format"].value()
     tw = f.width() * f.pixelAspect()   # square up anamorphic formats
-    return comfy_client.generation_size(tw, f.height(),
-                                        node["megapixels"].value(),
-                                        _multiple(node))
+    if _uses_megapixels(node):
+        return comfy_client.generation_size(tw, f.height(),
+                                            node["megapixels"].value(),
+                                            _multiple(node))
+    return comfy_client.snap_size(tw, f.height(), _multiple(node))
 
 
 def _output_dir(node):
@@ -740,11 +845,18 @@ MAX_VIDEO_FRAMES = 400      # ask before rendering and sending more than this
 
 def _input_size(node, index, resize=True):
     """(w, h) an input should be sent at, and whether it is already exactly
-    that, in which case it must not be resampled."""
+    that, in which case it must not be resampled. The first input is sent at
+    the generation size; the others at their own aspect, at the same pixel
+    budget."""
     f = node.input(index).format()
-    w, h = comfy_client.generation_size(f.width() * f.pixelAspect(), f.height(),
-                                        node["megapixels"].value(),
-                                        _multiple(node))
+    gw, gh = _generation_size(node)
+    if index == _frame_input(node):
+        w, h = gw, gh
+    else:
+        budget = node["megapixels"].value() if _uses_megapixels(node) \
+            else gw * gh / 1024.0 ** 2
+        w, h = comfy_client.generation_size(f.width() * f.pixelAspect(),
+                                            f.height(), budget, _multiple(node))
     exact = (f.width(), f.height(), f.pixelAspect()) == (w, h, 1)
     return w, h, exact or not resize
 
@@ -757,6 +869,7 @@ def _write_input(node, n, index, path, frame):
                               wf is None or wf.resize_inputs)
     with node:
         prep = nuke.toNode("prep%d" % n)
+        prep["resize"].setValue(_FIT_RESIZE[_fit(node)])
         prep["box_width"].setValue(w)
         prep["box_height"].setValue(h)
         prep["disable"].setValue(as_is)    # already the right size: no resample
@@ -771,11 +884,12 @@ def _write_input(node, n, index, path, frame):
 
 def _write_video(node, n, index, path, first, last, fps):
     """Write video input n over first..last to path as a ProRes .mov. Always
-    scaled to the megapixel budget: every frame costs memory in Comfy."""
+    resized like an image input: every frame costs memory in Comfy."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     w, h, as_is = _input_size(node, index)
     with node:
         prep = nuke.toNode("vprep%d" % n)
+        prep["resize"].setValue(_FIT_RESIZE[_fit(node)])
         prep["box_width"].setValue(w)
         prep["box_height"].setValue(h)
         prep["disable"].setValue(as_is)
@@ -858,11 +972,18 @@ def _do_refresh(node):
             node["video_info"].setValue(";  ".join(lines) or "no video connected")
     wf = _workflow(node)
     images = _connected(node, IMG)
-    if node.knob("match_input") is not None:
-        if node["match_input"].value() and images:
-            _set_format(node["target_format"],
-                        node.input(images[0][1]).format())
-        node["target_format"].setEnabled(not node["match_input"].value())
+    frame = _frame_input(node)
+    follows = _follows_input(node)
+    if follows and frame is not None:
+        _set_format(node["target_format"], node.input(frame).format())
+    node["target_format"].setEnabled(not (follows and frame is not None))
+    node["megapixels"].setEnabled(_uses_megapixels(node))
+    undo = follows and frame is not None and node.knob("input_fit") is not None
+    with node:
+        to_target = nuke.toNode("ToTarget")
+        if to_target is not None:
+            to_target["resize"].setValue(
+                _UNFIT_RESIZE[_fit(node)] if undo else "fill")
     if node.knob("inputs_info") is not None:
         if wf is not None and wf.image_inputs is not None:
             parts = [wf.image_inputs[n - 1]["name"] for n, _ in images]
@@ -882,9 +1003,18 @@ def _do_refresh(node):
             else "none (optional)")
     w, h = _generation_size(node)
     f = node["target_format"].value()
-    text = "%d x %d" % (w, h)
+    mp = w * h / 1024.0 ** 2
+    text = "%d \u00d7 %d px \u00b7 %.2f MP" % (w, h, mp)
+    if wf is not None:
+        lo, hi = wf.megapixels_range
+        if not lo <= mp <= hi:
+            text += (" \u00b7 <font color='%s'>%s %s's %g\u2013%g MP</font>"
+                     % (WARN_COLOR, "above" if mp > hi else "below",
+                        wf.label, lo, hi))
+    if follows and frame is None:
+        text += " \u00b7 no input, from the format"
     if node["reformat_output"].value():
-        text += "  ->  reformat to %d x %d" % (f.width(), f.height())
+        text += "  \u2192  result %d \u00d7 %d" % (f.width(), f.height())
     node["gen_size"].setValue(text)
 
 

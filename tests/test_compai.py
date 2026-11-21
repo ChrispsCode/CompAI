@@ -24,6 +24,7 @@ sys.path[:0] = [os.path.join(HERE, "nuke_stub"), PLUGIN, HERE]
 import nuke                      # the stub
 import compai
 from compai import cli, comfy_client as cc, jobs, workflows
+from compai import node as cnode
 from compai.utility import grid
 from fake_comfy import FakeComfy, IMAGE_BYTES
 
@@ -632,18 +633,39 @@ class NukeNodes(WithFakeComfy):
                          "comfy_workflow host").split():
                 self.assertIsNotNone(g.knob(knob), "%s.%s" % (name, knob))
             self.assertEqual(g["comfy_workflow"].value(), name)
-            self.assertIs(g["reformat_output"].value(), False)     # raw by default
+            wf = workflows.load(name)
+            edit = bool(wf.max_images and wf.match_format
+                        and not wf.spec.get("length"))
+            # # an edit goes back over its input; everything else comes out raw
+            self.assertIs(g["reformat_output"].value(), edit, name)
+            self.assertEqual(g["size_mode"].value(),
+                             cnode.SIZE_INPUT if edit else
+                             cnode.SIZE_INPUT_MP if wf.max_images and wf.match_format
+                             else cnode.SIZE_FORMAT_MP, name)
+            self.assertEqual(g["size_mode"].values()[0] == cnode.SIZE_INPUT,
+                             bool(wf.max_images or wf.max_videos), name)
+            self.assertEqual(g.knob("input_fit") is not None,
+                             bool(wf.max_videos or (wf.max_images and wf.resize_inputs)),
+                             name)
             self.assertEqual(g.children["ToTarget"]["disable"].expression,
                              "!parent.reformat_output")
-            size = "%d x %d" % cc.generation_size(
-                2048, 1080, g["megapixels"].value(), workflows.load(name).multiple)
+            g["reformat_output"].setValue(False)
+            g["size_mode"].setValue(cnode.SIZE_FORMAT_MP)
+            nuke.fire_knob_changed(g, "size_mode")
+            w, h = cc.generation_size(2048, 1080, g["megapixels"].value(), wf.multiple)
+            size = "%d \u00d7 %d px \u00b7 %.2f MP" % (w, h, w * h / 1024.0 ** 2)
             self.assertEqual(g["gen_size"].value(), size)
+            self.assertTrue(g["megapixels"].enabled())
             g["reformat_output"].setValue(True)
             nuke.fire_knob_changed(g, "reformat_output")
             self.assertEqual(g["gen_size"].value(),
-                             size + "  ->  reformat to 2048 x 1080")
-            self.assertEqual(g.knob("match_input") is not None,
-                             bool(workflows.load(name).max_images))
+                             size + "  \u2192  result 2048 \u00d7 1080")
+            self.assertEqual(g.children["ToTarget"]["resize"].value(), "fill")
+            g["size_mode"].setValue(cnode.SIZE_FORMAT)
+            nuke.fire_knob_changed(g, "size_mode")
+            self.assertFalse(g["megapixels"].enabled())
+            self.assertTrue(g["gen_size"].value().startswith(
+                "%d \u00d7 %d px" % cc.snap_size(2048, 1080, wf.multiple)))
 
     def test_z_image_node(self):
         g = self.make("z_image_turbo_t2i")
@@ -802,16 +824,50 @@ class NukeNodes(WithFakeComfy):
         self.assertEqual(g.children["prep1"]["resize"].value(), "fill")
         self.assertFalse(g.children["prep1"]["disable"].value())   # resized
 
-        plate._format = nuke.Format(1360, 768, 1.0, "")   # already at budget
+        self.assertEqual(g["size_mode"].value(), "first input")     # its own size
+        self.assertEqual((g.children["prep1"]["box_width"].value(),   # squared up,
+                          g.children["prep1"]["box_height"].value()), (2464, 704))
+        self.assertNotIn("above", g["gen_size"].value())           # 1.65 MP is in range
+        self.assertTrue(g["reformat_output"].value())               # back over it
+        self.assertEqual(g.children["ToTarget"]["resize"].value(), "fit")  # undoes crop
+
+        plate._format = nuke.Format(1376, 768, 1.0, "")   # on Qwen's 32 grid
         g["generate"].execute()
         self.wait_idle(g)
         self.assertTrue(g.children["prep1"]["disable"].value())    # untouched
-        self.assertEqual(titled(self.submitted(), "nuke_latent")["inputs"]["width"], 1360)
+        self.assertEqual(titled(self.submitted(), "nuke_latent")["inputs"]["width"], 1376)
         sent = self.submitted()
         self.assertEqual(len(cc.image_slots(sent)), 1)
         self.assertEqual(titled(sent, "nuke_input_1")["inputs"]["image"],
                          "nuke/QwenEdit1_in1.png")
         self.assertIs(titled(sent, "nuke_enhance_switch")["inputs"]["switch"], True)
+
+        g["input_fit"].setValue("stretch")
+        nuke.fire_knob_changed(g, "input_fit")
+        self.assertEqual(g.children["ToTarget"]["resize"].value(), "distort")
+        plate._format = nuke.Format(748, 612, 1.0, "")      # an arbitrary crop
+        other._format = nuke.Format(1000, 500, 1.0, "")
+        g.setInput(1, other)
+        g["generate"].execute()
+        self.wait_idle(g)
+        prep = g.children["prep1"]
+        self.assertEqual((prep["resize"].value(), prep["box_width"].value(),
+                          prep["box_height"].value()), ("distort", 736, 608))
+        self.assertEqual(g.children["prep2"]["resize"].value(), "distort")
+        w, h = (g.children["prep2"][k].value() for k in ("box_width", "box_height"))
+        self.assertEqual((w, h), cc.generation_size(1000, 500, 736 * 608 / 1024.0 ** 2, 32))
+        self.assertEqual(g["gen_size"].value(),
+                         "736 \u00d7 608 px \u00b7 0.43 MP  \u2192  result 748 \u00d7 612")
+        g.setInput(1, None)
+
+        plate._format = nuke.Format(4096, 2160, 1.0, "")    # a whole 4K plate
+        nuke.fire_knob_changed(g, "inputChange")
+        self.assertIn("above Qwen Image Edit's", g["gen_size"].value())
+        nuke.answers.append(False)               # "generate anyway?" no
+        g["generate"].execute()
+        self.assertEqual(nuke.answers, [])       # it asked
+        self.assertNotIn(g.fullName(), jobs._JOBS)               # and didn't queue
+        self.assertEqual(g["last_file"].value(), "edit_v003.png")
 
         g.setInput(0, None)                      # last one removed: shrink back
         self.assertEqual(inputs(), ["img1"])
@@ -823,7 +879,10 @@ class NukeNodes(WithFakeComfy):
             return sorted(n.name() for n in g.children.values() if n.cls == "Input")
         self.assertEqual(inputs(), ["first", "last"])
         self.assertEqual(g["megapixels"].value(), 0.4)
-        self.assertEqual(g["gen_size"].value(), "896 x 480")     # 32 grid
+        self.assertEqual(g["size_mode"].value(), "first input at megapixels")
+        self.assertFalse(g["reformat_output"].value())           # a clip comes out raw
+        self.assertTrue(g["gen_size"].value().startswith(        # 32 grid; no input yet
+            "896 \u00d7 480 px \u00b7 0.41 MP \u00b7 no input"))
         self.assertEqual((g["duration"].value(), g["steps"].value(),
                           g["lightning_steps"].value()), (2.0, 20, 8))
         self.assertEqual(g["fps"].expression, "root.fps")        # follows project
@@ -913,7 +972,7 @@ class NukeNodes(WithFakeComfy):
     def test_reference_video_node(self):
         g = self.make("minimax_h3_ref2va")
         self.assertEqual(g.name(), "MiniMaxRefVideo1")
-        self.assertIs(g["match_input"].value(), False)   # refs don't set the format
+        self.assertEqual(g["size_mode"].value(), "format at megapixels")  # refs don't set it
         self.assertEqual((g["ref_size"].values(), g["lightning_steps"].value()),
                          (["match", "max"], 4))
         g["generate"].execute()                          # no references at all
