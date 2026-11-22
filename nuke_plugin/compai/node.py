@@ -70,7 +70,7 @@ def add_menu():
         menu.clearMenu()
     else:
         icon = os.path.join(os.path.dirname(__file__), "claude_node_icon.png")
-        menu = nodes.addMenu("Comfy", icon=icon)
+        menu = nodes.addMenu(name="Comfy", icon=icon)
     for name in workflows.names():
         try:
             label = workflows.load(name).label
