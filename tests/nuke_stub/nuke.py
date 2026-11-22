@@ -408,10 +408,21 @@ class _Menu(object):
         self.commands = {}
 
     def addMenu(self, name, icon=None):
+        self.added = True
         return self
+
+    def findItem(self, name):
+        """The Comfy menu once added (the stub has just the one)."""
+        return self if getattr(self, "added", False) else None
+
+    def clearMenu(self):
+        self.commands = {}
 
     def addCommand(self, name, command):
         self.commands[name] = command
+
+    def addSeparator(self):
+        pass
 
     def run(self, name):
         """Test helper: run a string command as Nuke would."""
@@ -419,6 +430,9 @@ class _Menu(object):
 
 
 _menu = _Menu()
+
+
+GUI = False
 
 
 def menu(name):

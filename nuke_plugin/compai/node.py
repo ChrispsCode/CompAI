@@ -61,9 +61,16 @@ WARN_COLOR = "#e8a33d"
 # --------------------------------------------------------------------------
 
 def add_menu():
-    """One entry per installed workflow, under Comfy in the node menu."""
-    icon = os.path.join(os.path.dirname(__file__), "claude_node_icon.png")
-    menu = nuke.menu("Nodes").addMenu("Comfy", icon=icon)
+    """One entry per installed workflow, under Comfy in the node menu. Safe
+    to call again: an existing Comfy menu is emptied and refilled in place,
+    so reload picks up new, renamed and removed workflows."""
+    nodes = nuke.menu("Nodes")
+    menu = nodes.findItem("Comfy")
+    if menu is not None and hasattr(menu, "clearMenu"):    # a Menu, not a command
+        menu.clearMenu()
+    else:
+        icon = os.path.join(os.path.dirname(__file__), "claude_node_icon.png")
+        menu = nodes.addMenu("Comfy", icon=icon)
     for name in workflows.names():
         try:
             label = workflows.load(name).label
@@ -77,6 +84,11 @@ def add_menu():
     menu.addCommand("Utility/CompAI Crop", "import compai; compai.create_crop()")
     menu.addCommand("Utility/CompAI Uncrop",
                     "import compai; compai.create_uncrop()")
+    # for trying code changes without a restart; compai itself first, so a
+    # new __init__ decides what else reloads
+    menu.addSeparator()
+    menu.addCommand("Reload CompAI",
+                    "import importlib, compai; importlib.reload(compai).reload()")
 
 
 def create(name):

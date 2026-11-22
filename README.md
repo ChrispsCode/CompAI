@@ -346,7 +346,7 @@ A new workflow should need **no Python**. If one does, the standard node lacks a
 - `setEnabled(False)` on a user knob is saved with the script.
 - Don't rely on a chained `init.py`: with `nuke.pluginAddPath("/…/CompAI/")` in `~/.nuke/init.py`, Nuke 15.2 added the path but never ran `CompAI/init.py` (it did run when the same folder was on `NUKE_PATH`; cause not found). Pointing the plugin path straight at `nuke_plugin/` needs no `init.py`.
 - Harry's preferred default output dir is `[getenv SHOT_ROOT]/gen`.
-- After editing code with Nuke open: `import compai; compai.reload()`. Existing nodes pick up the new code; only knob layout changes need the node recreated.
+- After editing code with Nuke open: **Comfy > Reload CompAI** at the bottom of the node menu (it reloads `compai` itself, then `compai.reload()` reloads the rest). Existing nodes pick up the new code; only knob layout changes need the node recreated. It also rebuilds the Comfy menu, so new, renamed and removed workflows show.
 - **Treat Harry's versions of files as canonical.** He tests in real Nuke and patches things. Diff against his copy before rewriting.
 
 ## 8. Status: what's actually been tested

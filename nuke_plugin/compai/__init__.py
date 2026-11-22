@@ -99,12 +99,18 @@ def on_uncrop_changed():
 
 
 def reload():
-    """Pick up code changes without restarting Nuke. Existing nodes use the
-    new code straight away; nodes are only rebuilt by creating them again."""
+    """Pick up code changes without restarting Nuke, and rebuild the Comfy
+    menu so new, renamed and removed workflows show. Existing nodes use the
+    new code straight away; their knobs only change by creating them again."""
     import importlib
     import sys
+    import nuke
     for name in ("comfy_client", "workflows", "jobs", "node",
                  "utility.grid", "utility.crop"):
         module = sys.modules.get(__name__ + "." + name)
         if module is not None:
             importlib.reload(module)
+    # only once every module reloaded: a half-edited file leaves the old menu
+    if nuke.GUI:
+        add_menu()
+    print(">> CompAI reloaded.")

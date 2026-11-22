@@ -620,12 +620,19 @@ class NukeNodes(WithFakeComfy):
         import importlib
         import menu
         importlib.reload(menu)
-        commands = nuke.menu("Nodes").commands
+        commands = dict(nuke.menu("Nodes").commands)
         self.assertEqual(sorted(commands),
                          ["Minimax_H3_Image", "Minimax_H3_Image_Edit", "Minimax_H3_fl2va", "Minimax_H3_ref2va", "P-H3-Image",
                           "Qwen Image",
-                          "Qwen Image Edit", "Utility/CompAI Crop",
+                          "Qwen Image Edit", "Reload CompAI", "Utility/CompAI Crop",
                           "Utility/CompAI Uncrop", "Z-Image Turbo"])
+        self.assertEqual(list(commands)[-1], "Reload CompAI")   # at the bottom
+        self.assertEqual(commands["Reload CompAI"],             # not run here: it
+                         "import importlib, compai; "           # swaps the modules
+                         "importlib.reload(compai).reload()")
+        nuke.menu("Nodes").commands["Stale workflow"] = "x"      # rebuilt in place:
+        cnode.add_menu()                                         # a removed one goes,
+        self.assertEqual(nuke.menu("Nodes").commands, commands)  # nothing doubles
         nuke.menu("Nodes").run("Z-Image Turbo")
         self.assertIn("ZImageTurbo1", [n.name() for n in nuke.allNodes()])
 
