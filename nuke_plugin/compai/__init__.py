@@ -56,6 +56,11 @@ def on_create_read(n):
     node.on_create_read(n)
 
 
+def on_open_folder(n):
+    from . import node
+    node.on_open_folder(n)
+
+
 # CompAI Crop / Uncrop (utility/crop.py)
 
 def create_crop():

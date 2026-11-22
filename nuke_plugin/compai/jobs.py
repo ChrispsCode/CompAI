@@ -9,7 +9,6 @@ used_prompt, and an internal Read named ComfyRead. node.py provides them.
 """
 
 import os
-import shutil
 import threading
 import traceback
 
@@ -34,16 +33,18 @@ def release_stale_lock(node):
         node["generate"].setEnabled(True)
 
 
-def start(node, fn, params, summary, cleanup=None):
+def start(node, fn, params, summary, cleanup=None, note=""):
     """Run fn(should_cancel=..., log=..., **params) in the background. fn
     returns a dict with at least path, seconds, and seed/prompt if used.
-    cleanup is a directory to delete once the job ends, however it ends."""
+    cleanup is a list of files to delete once the job ends, however it
+    ends. note is added to the "done" line, which is the one that stays up
+    (the summary is replaced by progress at once)."""
     key = node.fullName()
     cancel = threading.Event()
     _JOBS[key] = cancel
     node["generate"].setEnabled(False)
     _status(key, summary)
-    threading.Thread(target=_worker, args=(key, fn, params, cancel, cleanup),
+    threading.Thread(target=_worker, args=(key, fn, params, cancel, cleanup, note),
                      name="ComfyJob:" + key, daemon=True).start()
 
 
@@ -54,21 +55,24 @@ def on_cancel(node):
         _status(node.fullName(), "cancelling...")
 
 
-def _worker(key, fn, params, cancel, cleanup=None):
+def _worker(key, fn, params, cancel, cleanup=None, note=""):
     try:
         try:
             result = fn(should_cancel=cancel.is_set,
                         log=lambda msg: _status(key, msg), **params)
         finally:
-            if cleanup:                # before reporting, so it's gone by then
-                shutil.rmtree(cleanup, ignore_errors=True)
-        nuke.executeInMainThread(_on_done, args=(key, result))
+            for path in cleanup or ():   # before reporting, so they're gone
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+        nuke.executeInMainThread(_on_done, args=(key, result, note))
     except Exception as e:  # report everything back to the UI
         traceback.print_exc()
         nuke.executeInMainThread(_on_error, args=(key, str(e)))
 
 
-def _on_done(key, result):
+def _on_done(key, result, note=""):
     _JOBS.pop(key, None)
     node = nuke.toNode(key)
     if node is None:          # node deleted while generating
@@ -95,8 +99,9 @@ def _on_done(key, result):
         node["last_seed"].setValue(int(result["seed"]))
     node["used_prompt"].setValue(result.get("used_prompt")
                                  or result.get("prompt") or "")
-    node["status"].setValue("done in %ss  ->  %s"
-                            % (result["seconds"], os.path.basename(result["path"])))
+    node["status"].setValue("done in %ss  ->  %s%s"
+                            % (result["seconds"], os.path.basename(result["path"]),
+                               note))
 
 
 def _on_error(key, message):

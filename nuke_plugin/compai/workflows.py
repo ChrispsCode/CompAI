@@ -59,7 +59,8 @@ RESERVED = set("""
     input_fit gen_size reformat_output inputs_info video_range video_first video_last video_info
     output_dir out_name generate cancel reuse_seed status
     last_file last_seed used_prompt comfy_workflow host input_mode
-    png_colorspace temp_inputs instant_cleanup refresh_choices create_read timeout
+    png_colorspace temp_inputs instant_cleanup reuse_inputs refresh_choices
+    create_read open_folder timeout
     name label disable selected xpos ypos tile_color note_font
     note_font_size note_font_color hide_input cached postage_stamp
     lifetimeStart lifetimeEnd useLifetime knobChanged onCreate onDestroy

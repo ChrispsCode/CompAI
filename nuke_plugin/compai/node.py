@@ -20,10 +20,12 @@ knob block, built from the "knobs" list in its node.json. Nothing in here is
 specific to one model: to add a model, add a workflow folder (see README).
 """
 
+import hashlib
 import os
 import random
 import re
-import shutil
+import subprocess
+import sys
 import tempfile
 
 import nuke
@@ -419,7 +421,8 @@ def _action_knobs():
             nuke.PyScript_Knob("cancel", "Cancel", CALL % "on_cancel"),
             nuke.PyScript_Knob("reuse_seed", "Reuse last seed",
                                CALL % "on_reuse_seed"),
-            nuke.Text_Knob("status", "status", "idle"), _create_read_knob()]
+            nuke.Text_Knob("status", "status", "idle"), _create_read_knob(),
+            _open_folder_knob()]
 
 
 def _create_read_knob():
@@ -429,6 +432,15 @@ def _create_read_knob():
                     "node, so it stays in the script when you generate again. "
                     "It reads the raw generated file.")
     knob.setFlag(nuke.STARTLINE)
+    return knob
+
+
+def _open_folder_knob():
+    knob = nuke.PyScript_Knob("open_folder", "Open Folder",
+                              CALL % "on_open_folder")
+    knob.setTooltip("Open the output dir, where the results go, in the "
+                    "system file browser.")
+    knob.clearFlag(nuke.STARTLINE)
     return knob
 
 
@@ -465,20 +477,36 @@ def _settings_knobs(wf):
         cs.setTooltip("Colorspace for the PNGs sent to Comfy and the result read "
                       "back. Empty = first sRGB match in the current OCIO config.")
         temp = nuke.Boolean_Knob("temp_inputs", "temporary input images")
-        temp.setTooltip("Off: the PNGs sent to Comfy are kept next to the "
-                        "result (name_v003_in1.png), so the run can be "
-                        "reopened in ComfyUI any time.\nOn: they are written "
-                        "to the system temp folder instead, which the system "
-                        "empties on reboot and sweeps of old files. They "
-                        "last long enough to check a run in ComfyUI now, "
-                        "but not for good.")
+        temp.setTooltip("Off: the files sent to Comfy are kept next to the "
+                        "result, so the run can be reopened in ComfyUI any "
+                        "time.\nOn: they are written to one folder per "
+                        "output dir in the system temp folder instead, which "
+                        "the system empties on reboot and sweeps of old "
+                        "files. They last long enough to check a run in "
+                        "ComfyUI now, but not for good.")
         temp.setFlag(nuke.STARTLINE)
         instant = nuke.Boolean_Knob("instant_cleanup", "instant cleanup")
-        instant.setTooltip("With temporary input images on: delete them as "
-                           "soon as the run ends, instead of leaving them "
-                           "for the system to clear.")
+        instant.setTooltip("With temporary input images on: delete the files "
+                           "a run wrote as soon as it ends, instead of "
+                           "leaving them for the system to clear. Off while "
+                           "reuse existing input images is on.")
         instant.clearFlag(nuke.STARTLINE)
-        knobs += [mode, cs, temp, instant]
+        reuse = nuke.Boolean_Knob("reuse_inputs", "reuse existing input images")
+        reuse.setTooltip(
+            "Every input file is named after what it is, e.g. "
+            "edit_in1_CompAICrop1_f1001_736x608.png or "
+            "edit_vid1_Read2_f1001-1096_896x480_24fps.mov (slot, the node "
+            "plugged in, frame or range, size sent).\n\n"
+            "Off: every run writes its inputs afresh, replacing a file of "
+            "the same name.\n\n"
+            "On: a run that finds that file already there sends it again "
+            "instead of rendering it. Saves time, and especially video "
+            "renders, while you work on the prompt.\n\n"
+            "Careful: a change upstream that keeps the same node, frame and "
+            "size is not seen, and the old file is sent. Turn this off for "
+            "one run after changing the input.")
+        reuse.setFlag(nuke.STARTLINE)
+        knobs += [mode, cs, temp, instant, reuse]
     return knobs
 
 
@@ -578,7 +606,7 @@ def on_knob_changed():
         if wf is not None:
             _guarded(_sync_all_inputs, node, wf)
     if name in ("size_mode", "target_format", "megapixels", "input_fit",
-                "temp_inputs", "video_range", "reformat_output",
+                "temp_inputs", "reuse_inputs", "video_range", "reformat_output",
                 "inputChange", "showPanel"):
         _refresh(node)
     elif node.knob("video_info") is not None:
@@ -611,6 +639,29 @@ def on_create_read(node):
         read["frame"].setValue(frame)
         read.setXYpos(node.xpos() + 120, node.ypos())
     return read
+
+
+def on_open_folder(node):
+    folder = _output_dir(node)
+    if not os.path.isdir(folder):
+        nuke.message("%s doesn't exist yet. It is made by the first "
+                     "generation." % folder)
+        return
+    _open_in_file_browser(folder)
+
+
+def _open_in_file_browser(folder):
+    if sys.platform.startswith("win"):
+        os.startfile(folder)
+        return
+    # # Nuke's own library and Python paths break the system's file browser
+    # # on Linux, so it is started without them.
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("LD_LIBRARY_PATH", "PYTHONPATH", "PYTHONHOME",
+                        "QT_PLUGIN_PATH", "QT_QPA_PLATFORM_PLUGIN_PATH")}
+    opener = "open" if sys.platform == "darwin" else "xdg-open"
+    subprocess.Popen([opener, folder], env=env, stdin=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def on_refresh_choices(node):
@@ -697,21 +748,20 @@ def on_generate(node):
     summary = "%dx%d, seed %d..." % (values["width"], values["height"],
                                      values["seed"])
 
-    cleanup = None
+    cleanup, note = None, ""
     if images_in or videos_in:
         # Write the inputs on the main thread: images at the current frame,
         # videos over their range. Numbered slots are packed (img1 + img3 ->
         # slots 1, 2); named inputs keep their own place, with None for the
         # ones not connected.
-        stem, frame = os.path.splitext(out_path)[0], nuke.frame()
-        fps = nuke.root()["fps"].value()
-        if node.knob("temp_inputs") is not None and node["temp_inputs"].value():
-            folder = tempfile.mkdtemp(prefix="compai_")
-            stem = os.path.join(folder, os.path.basename(stem))
-            if node.knob("instant_cleanup") is None \
-                    or node["instant_cleanup"].value():
-                cleanup = folder       # removed when the run ends
-            # otherwise it stays until the system clears its temp folder
+        # Each file is named after what it is (slot, upstream node, frame or
+        # range, size), so with reuse on a later run can find it again.
+        frame, fps = nuke.frame(), nuke.root()["fps"].value()
+        reuse = _is_on(node, "reuse_inputs")
+        in_dir = os.path.dirname(out_path)
+        if _is_on(node, "temp_inputs"):
+            in_dir = _temp_inputs_dir(node)
+        written, reused = [], 0
         named = wf.image_inputs is not None
         images = [None] * wf.max_images if named else []
         uploads = list(images)         # stable per-node names in Comfy's input
@@ -719,8 +769,14 @@ def on_generate(node):
         try:
             for slot, (n, index) in enumerate(images_in, start=1):
                 tag = wf.image_inputs[n - 1]["name"] if named else "in%d" % slot
-                path = "%s_%s.png" % (stem, tag)
-                _write_input(node, n, index, path, frame)
+                w, h = _sent_size(node, index, wf.resize_inputs)
+                path = os.path.join(in_dir, "%s_f%d_%dx%d.png" % (
+                    _input_stem(node, tag, index), frame, w, h))
+                if _make_input(path, reuse, lambda part: _write_input(
+                        node, n, index, part, frame)):
+                    reused += 1
+                else:
+                    written.append(path)
                 upload = "%s_%s.png" % (node.name(), tag)
                 if named:
                     images[n - 1], uploads[n - 1] = path, upload
@@ -729,15 +785,24 @@ def on_generate(node):
                     uploads.append(upload)
             for slot, ((n, index), (first, last)) in enumerate(
                     zip(videos_in, ranges), start=1):
-                path = "%s_vid%d.mov" % (stem, slot)
-                _write_video(node, n, index, path, first, last, fps)
+                tag = "vid%d" % slot
+                w, h = _sent_size(node, index)
+                path = os.path.join(in_dir, "%s_f%d-%d_%dx%d_%sfps.mov" % (
+                    _input_stem(node, tag, index), first, last, w, h,
+                    ("%.3f" % fps).rstrip("0").rstrip(".")))
+                if _make_input(path, reuse, lambda part: _write_video(
+                        node, n, index, part, first, last, fps)):
+                    reused += 1
+                else:
+                    written.append(path)
                 videos.append(path)
-                video_uploads.append("%s_vid%d.mov" % (node.name(), slot))
+                video_uploads.append("%s_%s.mov" % (node.name(), tag))
         except Exception as e:
-            if cleanup:
-                shutil.rmtree(cleanup, ignore_errors=True)
             nuke.message("Failed writing inputs:\n%s" % e)
             return
+        if _is_on(node, "temp_inputs") and _is_on(node, "instant_cleanup") \
+                and not reuse:
+            cleanup = written          # removed when the run ends
         refs = []
         if images_in:
             params.update(images=images, upload_names=uploads,
@@ -746,8 +811,14 @@ def on_generate(node):
         if videos:
             params.update(videos=videos, video_upload_names=video_uploads)
             refs.append("%d video(s)" % len(videos))
+        if reused:
+            refs.append("%d reused" % reused)
+            note = "  (%d of %d input%s reused)" % (
+                reused, len(images_in) + len(videos),
+                "" if len(images_in) + len(videos) == 1 else "s")
         summary = "%s, %s" % (", ".join(refs), summary)
-    jobs.start(node, workflows.generate, params, "queued " + summary, cleanup)
+    jobs.start(node, workflows.generate, params, "queued " + summary, cleanup,
+               note)
 
 
 # --------------------------------------------------------------------------
@@ -824,9 +895,13 @@ def _output_dir(node):
     return os.path.normpath(d)
 
 
+def _out_name(node):
+    return re.sub(r"[^\w\-]+", "_", node["out_name"].value().strip()) or "gen"
+
+
 def _next_output_path(node):
     out_dir = _output_dir(node)
-    name = re.sub(r"[^\w\-]+", "_", node["out_name"].value().strip()) or "gen"
+    name = _out_name(node)
     # any extension: results may be .png, .mp4, .mov, plus the .json sidecar
     pattern = re.compile(r"^%s_v(\d{3,})\.\w+$" % re.escape(name))
     existing = []
@@ -861,9 +936,55 @@ def _input_size(node, index, resize=True):
     return w, h, exact or not resize
 
 
+def _is_on(node, name):
+    knob = node.knob(name)
+    return knob is not None and bool(knob.value())
+
+
+def _sent_size(node, index, resize=True):
+    """(w, h) the input at index is sent at, as _write_input and
+    _write_video write it, known without rendering."""
+    w, h, as_is = _input_size(node, index, resize)
+    if as_is:
+        f = node.input(index).format()
+        return f.width(), f.height()
+    return w, h
+
+
+def _input_stem(node, tag, index):
+    """Start of an input file's name: output name, slot, upstream node."""
+    source = re.sub(r"[^\w\-]+", "_", node.input(index).name())
+    return "%s_%s_%s" % (_out_name(node), tag, source)
+
+
+def _make_input(path, reuse, write):
+    """Write an input file to path with write(file), or with reuse on keep
+    the one already there. True if it was reused. Written under a scratch
+    name and moved into place, so a render that dies halfway never leaves a
+    broken file to be reused."""
+    if reuse and os.path.isfile(path):
+        return True
+    root, ext = os.path.splitext(path)
+    part = "%s_writing%s" % (root, ext)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    try:
+        write(part)
+        os.replace(part, path)
+    finally:
+        if os.path.exists(part):
+            os.remove(part)
+    return False
+
+
+def _temp_inputs_dir(node):
+    """Temp folder for input files: one per output dir, so a later run can
+    reuse them and two shots with the same names never share."""
+    key = hashlib.md5(_output_dir(node).encode("utf-8")).hexdigest()[:10]
+    return os.path.join(tempfile.gettempdir(), "compai_inputs", key)
+
+
 def _write_input(node, n, index, path, frame):
     """Write image input n (the pipe at index) to path as a PNG."""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
     wf = _workflow(node)
     w, h, as_is = _input_size(node, index,       # references go as they are
                               wf is None or wf.resize_inputs)
@@ -885,7 +1006,6 @@ def _write_input(node, n, index, path, frame):
 def _write_video(node, n, index, path, first, last, fps):
     """Write video input n over first..last to path as a ProRes .mov. Always
     resized like an image input: every frame costs memory in Comfy."""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
     w, h, as_is = _input_size(node, index)
     with node:
         prep = nuke.toNode("vprep%d" % n)
@@ -958,7 +1078,8 @@ def _refresh(node):
 
 def _do_refresh(node):
     if node.knob("instant_cleanup") is not None:
-        node["instant_cleanup"].setEnabled(bool(node["temp_inputs"].value()))
+        node["instant_cleanup"].setEnabled(_is_on(node, "temp_inputs")
+                                           and not _is_on(node, "reuse_inputs"))
     if node.knob("video_range") is not None:
         custom = node["video_range"].value() == RANGE_CUSTOM
         node["video_first"].setEnabled(custom)

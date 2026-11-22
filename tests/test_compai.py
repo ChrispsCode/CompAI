@@ -38,6 +38,11 @@ def dangling(graph):
             if isinstance(v, list) and len(v) == 2 and v[0] not in graph]
 
 
+def rendered():
+    """(file, first, last) for every render, by the name it is moved to."""
+    return [(p.replace("_writing", ""), a, b) for p, a, b in nuke.executed]
+
+
 def titled(graph, title):
     return graph[cc.find_node(graph, title)]
 
@@ -818,7 +823,8 @@ class NukeNodes(WithFakeComfy):
         g["generate"].execute()
         self.wait_idle(g)
         self.assertEqual(nuke.messages[1:], [])
-        self.assertTrue(os.path.isfile(os.path.join(self.tmp, "edit_v001_in1.png")))
+        self.assertTrue(os.path.isfile(os.path.join(
+            self.tmp, "edit_in1_plate_f%d_2464x704.png" % nuke.frame())))
         self.assertEqual(g["last_file"].value(), "edit_v001.png")
         self.assertTrue(g.children["write1"]["disable"].value())
         self.assertEqual(g.children["prep1"]["resize"].value(), "fill")
@@ -899,7 +905,8 @@ class NukeNodes(WithFakeComfy):
         self.assertEqual(nuke.messages[1:], [])
         self.assertEqual(g["last_file"].value(), "video_v001.mp4")
         self.assertTrue(g.children["ComfyRead"]["file"].value().endswith(".mp4"))
-        self.assertTrue(os.path.isfile(os.path.join(self.tmp, "video_v001_last.png")))
+        self.assertTrue(os.path.isfile(os.path.join(
+            self.tmp, "video_last_plate_f%d_896x480.png" % nuke.frame())))
         sent = self.submitted()
         self.assertNotIn("first_frame", titled(sent, "nuke_MiniMaxH3_i2v")["inputs"])
         self.assertEqual(titled(sent, "nuke_last_frame")["inputs"]["image"],
@@ -933,7 +940,7 @@ class NukeNodes(WithFakeComfy):
         written = []
         real = nuke.execute
         def execute(write, first, last):
-            written.append(write["file"].value())
+            written.append(write["file"].value().replace("_writing", ""))
             real(write, first, last)
         nuke.execute = execute
         self.addCleanup(setattr, nuke, "execute", real)
@@ -944,6 +951,7 @@ class NukeNodes(WithFakeComfy):
         self.assertFalse(written[0].startswith(self.tmp))        # not beside the result
         self.assertTrue(written[0].startswith(tempfile.gettempdir()))
         self.assertTrue(os.path.isfile(written[0]))              # still there to inspect
+        self.assertEqual(os.path.dirname(written[0]), cnode._temp_inputs_dir(g))
         self.addCleanup(shutil.rmtree, os.path.dirname(written[0]), True)
         self.assertEqual(sorted(os.listdir(self.tmp)),
                          ["edit_v001.json", "edit_v001.png"])
@@ -951,9 +959,91 @@ class NukeNodes(WithFakeComfy):
         g["instant_cleanup"].setValue(True)                      # now delete at once
         g["generate"].execute()
         self.wait_idle(g)
-        self.assertEqual(len(written), 2)
-        self.assertFalse(os.path.exists(os.path.dirname(written[1])))
+        self.assertEqual(len(written), 2)                        # off: rendered again
+        self.assertFalse(os.path.exists(written[1]))
         self.assertIn(b"fake png", self.comfy.uploads[0])        # Comfy still got it
+
+    def test_reuse_existing_input_images(self):
+        g = self.make("qwen_edit")
+        self.assertIs(g["reuse_inputs"].value(), False)          # off by default
+        plate = nuke.nodes.Read(name="plate")
+        plate._format = nuke.Format(768, 640, 1.0, "")
+        g.setInput(0, plate)
+        written = []
+        real = nuke.execute
+        def execute(write, first, last):
+            written.append(write["file"].value().replace("_writing", ""))
+            real(write, first, last)
+        nuke.execute = execute
+        self.addCleanup(setattr, nuke, "execute", real)
+
+        def run():
+            g["generate"].execute()
+            self.wait_idle(g)
+            self.assertEqual(nuke.messages, [])
+            return titled(self.submitted(), "nuke_input_1")["inputs"]
+
+        name = os.path.join(self.tmp, "edit_in1_plate_f%d_768x640.png" % nuke.frame())
+        run()
+        with open(name, "wb") as f:                              # off: rendered again,
+            f.write(b"old")                                      # replacing the file
+        run()
+        self.assertEqual(written, [name, name])
+        with open(name, "rb") as f:
+            self.assertEqual(f.read(), b"fake png")
+        self.assertFalse([f for f in os.listdir(self.tmp) if "_writing" in f])
+
+        g["reuse_inputs"].setValue(True)                         # on: the one made
+        run()                                                    # with it off is
+        run()                                                    # sent again
+        self.assertEqual(len(written), 2)
+        self.assertTrue(g["status"].value().endswith("(1 of 1 input reused)"),
+                        g["status"].value())
+        plate._format = nuke.Format(1024, 512, 1.0, "")         # other size: new file
+        run()
+        self.assertEqual(os.path.basename(written[-1]),
+                         "edit_in1_plate_f%d_1024x512.png" % nuke.frame())
+        g.setInput(0, nuke.nodes.Read(name="other"))            # other node: new file
+        run()
+        self.assertIn("_in1_other_", written[-1])
+        self.assertEqual(len(written), 4)
+
+        g["temp_inputs"].setValue(True)                         # reuse in temp:
+        g["instant_cleanup"].setValue(True)                     # one stable folder,
+        nuke.fire_knob_changed(g, "temp_inputs")                # never cleaned
+        self.assertFalse(g["instant_cleanup"].enabled())
+        run()
+        run()
+        self.assertEqual(len(written), 5)
+        folder = os.path.dirname(written[-1])
+        self.addCleanup(shutil.rmtree, folder, True)
+        self.assertEqual(folder, cnode._temp_inputs_dir(g))
+        self.assertTrue(os.path.isfile(written[-1]))
+
+        real_write = cnode._write_input                          # a render that dies
+        def dies(node, n, index, path, frame):                   # leaves nothing
+            open(path, "wb").close()                             # to be reused
+            raise RuntimeError("render failed")
+        cnode._write_input = dies
+        self.addCleanup(setattr, cnode, "_write_input", real_write)
+        g.setInput(0, nuke.nodes.Read(name="third"))
+        g["generate"].execute()
+        self.assertIn("render failed", nuke.messages[-1])
+        self.assertFalse([f for f in os.listdir(folder) if "third" in f])
+
+    def test_open_folder(self):
+        g = self.make("qwen_t2i")
+        opened = []
+        real = cnode._open_in_file_browser
+        cnode._open_in_file_browser = opened.append
+        self.addCleanup(setattr, cnode, "_open_in_file_browser", real)
+        g["output_dir"].setValue(os.path.join(self.tmp, "not_yet"))
+        g["open_folder"].execute()
+        self.assertEqual(opened, [])
+        self.assertIn("doesn't exist yet", nuke.messages[-1])
+        g["output_dir"].setValue(self.tmp)
+        compai.on_open_folder(g)
+        self.assertEqual(opened, [self.tmp])
 
     def test_temporary_inputs_are_deleted_when_the_run_fails(self):
         g = self.make("qwen_edit")
@@ -961,13 +1051,13 @@ class NukeNodes(WithFakeComfy):
         g["temp_inputs"].setValue(True)
         g["instant_cleanup"].setValue(True)
         g["host"].setValue("127.0.0.1:9")
-        before = set(os.listdir(tempfile.gettempdir()))
+        folder = cnode._temp_inputs_dir(g)
+        self.addCleanup(shutil.rmtree, folder, True)
         g["generate"].execute()
         self.wait_idle(g)
         self.assertIn("failed", nuke.messages[-1])
-        left = [d for d in set(os.listdir(tempfile.gettempdir())) - before
-                if d.startswith("compai_")]
-        self.assertEqual(left, [])
+        self.assertTrue(rendered())
+        self.assertEqual(os.listdir(folder), [])
 
     def test_reference_video_node(self):
         g = self.make("minimax_h3_ref2va")
@@ -1043,10 +1133,11 @@ class NukeNodes(WithFakeComfy):
         g["generate"].execute()
         self.wait_idle(g)
         self.assertEqual(nuke.messages, [])
-        mov = os.path.join(self.tmp, "video_v001_vid1.mov")
-        self.assertIn((mov, 1001, 1072), nuke.executed)          # the input's range
-        self.assertIn((os.path.join(self.tmp, "video_v001_in1.png"), 1001, 1001),
-                      nuke.executed)
+        mov = os.path.join(self.tmp, "video_vid1_clip_f1001-1072_864x480_24fps.mov")
+        self.assertIn((mov, 1001, 1072), rendered())            # the input's range
+        self.assertTrue(os.path.isfile(mov))
+        self.assertIn((os.path.join(self.tmp, "video_in1_still_f1001_2048x1080.png"),
+                       1001, 1001), rendered())
         vprep = g.children["vprep1"]                             # scaled to budget
         self.assertEqual((vprep["box_width"].value(), vprep["box_height"].value()),
                          (864, 480))
@@ -1070,14 +1161,24 @@ class NukeNodes(WithFakeComfy):
         g["video_last"].setValue(1033)
         g["generate"].execute()
         self.wait_idle(g)
-        self.assertIn((os.path.join(self.tmp, "video_v002_vid1.mov"), 1010, 1033),
-                      nuke.executed)
+        self.assertIn((os.path.join(
+            self.tmp, "video_vid1_clip_f1010-1033_864x480_24fps.mov"), 1010, 1033),
+            rendered())
 
         g["video_range"].setValue("project range")       # 1001-1100 in the stub
         g["generate"].execute()
         self.wait_idle(g)
-        self.assertIn((os.path.join(self.tmp, "video_v003_vid1.mov"), 1001, 1100),
-                      nuke.executed)
+        self.assertIn((os.path.join(
+            self.tmp, "video_vid1_clip_f1001-1100_864x480_24fps.mov"), 1001, 1100),
+            rendered())
+        g["reuse_inputs"].setValue(True)                 # same range: not rendered
+        nuke.executed[:] = []
+        g["generate"].execute()
+        self.wait_idle(g)
+        self.assertEqual(rendered(), [])
+        self.assertEqual(titled(self.submitted(), "nuke_video_1")["inputs"]["file"],
+                         "nuke/MiniMaxRefVideo1_vid1.mov")
+        self.assertIn(b"fake png", self.comfy.uploads[-1])      # the kept file went
 
     def test_long_video_asks_first(self):
         g = self.make("minimax_h3_ref2va")
